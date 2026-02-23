@@ -16,7 +16,7 @@ import { Stack, useRouter } from 'expo-router';
 import { doc, setDoc, collection } from 'firebase/firestore';
 import { db } from '../config/firebaseConfig';
 import * as Location from 'expo-location';
-import { LeadFile } from '../types';
+import { JobFile, LeadFile } from '../types';
 import { useAuth } from '../context/AuthContext';
 import LeadImagePicker from '../components/LeadImagePicker';
 
@@ -160,6 +160,20 @@ export default function AddLeadScreen() {
     const parsedDeductible = parseFloat(deductible.replace(/[^0-9.]/g, '')) || 0;
     const now = Date.now();
 
+    // Convert LeadFile[] (from LeadImagePicker) → JobFile[] (structured storage format)
+    const categoryToType = (cat: string): JobFile['type'] => {
+      if (cat === 'Install') return 'install';
+      if (cat === 'Documents') return 'document';
+      return 'inspection';
+    };
+    const jobFiles: JobFile[] = files.map((f) => ({
+      id: f.id,
+      url: f.url,
+      type: categoryToType(f.category),
+      isSharedWithCustomer: f.isPublic,
+      createdAt: new Date(f.createdAt).toISOString(),
+    }));
+
     // Geocode the address silently — never blocks save on failure
     let locationCoords: { lat: number; lng: number } | null = null;
     try {
@@ -239,7 +253,7 @@ export default function AddLeadScreen() {
       returnedMaterialCredit: 0,
       installersCost: 0,
       guttersCost: 0,
-      files,
+      files: jobFiles,
       folderPermissions,
     };
 

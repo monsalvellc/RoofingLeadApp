@@ -58,6 +58,7 @@ export interface Customer {
 export interface JobFile {
   id: string;
   url: string;
+  name?: string; // filename — populated for documents, optional for photos
   type: 'inspection' | 'install' | 'document';
   isSharedWithCustomer: boolean;
   createdAt: string;

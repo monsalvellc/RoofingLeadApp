@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, deleteDoc, doc, onSnapshot, orderBy, query, where } from 'firebase/firestore';
+import { collection, deleteDoc, deleteField, doc, getDocs, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
 import { db } from '../config/firebaseConfig';
 import { Job } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -133,6 +133,51 @@ export default function DashboardScreen() {
     setStatusFilter(null);
     setTypeFilter(null);
     setIsFilterModalVisible(false);
+  };
+
+  const migrateLegacyPhotos = () => {
+    Alert.alert(
+      'Migrate Legacy Photos?',
+      'Converts old string photo arrays to structured JobFile objects and removes the legacy "photos" field.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Migrate',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const snapshot = await getDocs(collection(db, 'jobs'));
+              let count = 0;
+              const updates: Promise<void>[] = [];
+              snapshot.forEach((docSnap) => {
+                const data = docSnap.data();
+                if (data.photos && Array.isArray(data.photos)) {
+                  const newFiles = data.photos.map((url: string, i: number) => ({
+                    id: Date.now().toString() + i,
+                    url,
+                    type: 'inspection',
+                    isSharedWithCustomer: false,
+                    createdAt: new Date().toISOString(),
+                  }));
+                  const existing = Array.isArray(data.files) ? data.files : [];
+                  updates.push(
+                    updateDoc(doc(db, 'jobs', docSnap.id), {
+                      files: [...existing, ...newFiles],
+                      photos: deleteField(),
+                    }),
+                  );
+                  count++;
+                }
+              });
+              await Promise.all(updates);
+              Alert.alert('Done', `Migrated ${count} job(s).`);
+            } catch (e: any) {
+              Alert.alert('Migration Failed', e.message);
+            }
+          },
+        },
+      ],
+    );
   };
 
   const handleDelete = (jobDocId: string) => {
@@ -270,6 +315,9 @@ export default function DashboardScreen() {
       <Pressable style={styles.fab} onPress={() => router.push('/add-lead')}>
         <Text style={styles.fabText}>+</Text>
       </Pressable>
+
+      {/* ── Temporary Migration Tool ── */}
+      <Button title="MIGRATE DATA" onPress={migrateLegacyPhotos} color="red" />
 
       {/* ── Filter Modal ── */}
       <Modal

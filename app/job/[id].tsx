@@ -1,21 +1,30 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Dimensions,
+  FlatList,
   Image,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams } from 'expo-router';
 import { arrayUnion, doc, getDoc, updateDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
 import { db, storage } from '../../config/firebaseConfig';
-import { Customer, Job } from '../../types';
+import { Customer, Job, JobFile } from '../../types';
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 const STATUS_COLORS: Record<string, string> = {
   Lead: '#1976d2',
@@ -45,15 +54,41 @@ const STATUSES: Job['status'][] = [
   'Completed',
 ];
 
+const FILE_SECTIONS: { type: JobFile['type']; label: string }[] = [
+  { type: 'inspection', label: 'Inspection Photos' },
+  { type: 'install', label: 'Install Photos' },
+  { type: 'document', label: 'Documents' },
+];
+
+// Height available for the photo inside the viewer (screen minus header + footer chrome)
+const VIEWER_PHOTO_HEIGHT = SCREEN_HEIGHT - 140;
+
 export default function JobDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const router = useRouter();
 
   const [job, setJob] = useState<Job | null>(null);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+
+  // File edit modal
+  const [selectedFile, setSelectedFile] = useState<JobFile | null>(null);
+  const [editingType, setEditingType] = useState<JobFile['type']>('inspection');
+  const [editingShared, setEditingShared] = useState(false);
+
+  // Full-screen viewer
+  const [viewingIndex, setViewingIndex] = useState<number | null>(null);
+  const [filteredPhotos, setFilteredPhotos] = useState<JobFile[]>([]);
+
+  // Stable refs required by FlatList — must not be recreated on render
+  const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
+    if (viewableItems.length > 0 && viewableItems[0].index !== null) {
+      setViewingIndex(viewableItems[0].index);
+    }
+  }).current;
+
+  const viewabilityConfig = useRef({ viewAreaCoveragePercentThreshold: 50 }).current;
 
   useEffect(() => {
     const fetchData = async () => {
@@ -101,11 +136,55 @@ export default function JobDetailScreen() {
     }
   };
 
-  const handleAddPhoto = async () => {
+  const openFileModal = (file: JobFile) => {
+    setSelectedFile(file);
+    setEditingType(file.type);
+    setEditingShared(file.isSharedWithCustomer);
+  };
+
+  const handleUpdateFile = async () => {
+    if (!selectedFile || !job) return;
+    const updatedFile: JobFile = {
+      ...selectedFile,
+      type: editingType,
+      isSharedWithCustomer: editingShared,
+    };
+    const updatedFiles = (job.files as any[]).map((f: any) =>
+      f.id === selectedFile.id ? updatedFile : f,
+    );
+    try {
+      await updateDoc(doc(db, 'jobs', id), { files: updatedFiles });
+      setJob((prev) => prev ? { ...prev, files: updatedFiles as any } : prev);
+      setSelectedFile(null);
+      setViewingIndex(null); // close viewer too — photo may have moved to a different section
+    } catch (e) {
+      console.error('Failed to update file:', e);
+      Alert.alert('Error', 'Could not update file.');
+    }
+  };
+
+  const handleDownloadPhoto = async (url: string) => {
+    const { status } = await MediaLibrary.requestPermissionsAsync(true);
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Photo library access is needed to save photos.');
+      return;
+    }
+    try {
+      const fileUri = FileSystem.documentDirectory + 'photo_' + Date.now() + '.jpg';
+      const { uri } = await FileSystem.downloadAsync(url, fileUri);
+      await MediaLibrary.saveToLibraryAsync(uri);
+      Alert.alert('Saved!', 'Photo saved to your gallery.');
+    } catch (e) {
+      console.error('Download failed:', e);
+      Alert.alert('Download Failed', 'Could not save photo. Please try again.');
+    }
+  };
+
+  const handleAddPhoto = async (photoType: JobFile['type'] = 'inspection') => {
     try {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Camera access is needed to take inspection photos.');
+        Alert.alert('Permission Required', 'Camera access is needed to take photos.');
         return;
       }
 
@@ -114,7 +193,6 @@ export default function JobDetailScreen() {
 
       setIsUploading(true);
 
-      // React Native blob workaround
       const response = await fetch(result.assets[0].uri);
       const blob = await response.blob();
 
@@ -122,10 +200,10 @@ export default function JobDetailScreen() {
       await uploadBytes(imageRef, blob);
       const downloadUrl = await getDownloadURL(imageRef);
 
-      const newFile = {
+      const newFile: JobFile = {
         id: Date.now().toString(),
         url: downloadUrl,
-        type: 'inspection' as const,
+        type: photoType,
         isSharedWithCustomer: false,
         createdAt: new Date().toISOString(),
       };
@@ -134,6 +212,39 @@ export default function JobDetailScreen() {
     } catch (e) {
       console.error('Photo upload failed:', e);
       Alert.alert('Upload Failed', 'Could not upload photo. Please try again.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleAddDocument = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: '*/*' });
+      if (result.canceled) return;
+
+      setIsUploading(true);
+
+      const asset = result.assets[0];
+      const response = await fetch(asset.uri);
+      const blob = await response.blob();
+
+      const docRef = ref(storage, `jobs/${id}/${Date.now()}_${asset.name}`);
+      await uploadBytes(docRef, blob);
+      const downloadUrl = await getDownloadURL(docRef);
+
+      const newDoc: JobFile = {
+        id: Date.now().toString(),
+        url: downloadUrl,
+        name: asset.name,
+        type: 'document',
+        isSharedWithCustomer: false,
+        createdAt: new Date().toISOString(),
+      };
+      await updateDoc(doc(db, 'jobs', id), { files: arrayUnion(newDoc) });
+      setJob((prev) => prev ? { ...prev, files: [...(prev.files ?? []), newDoc as any] } : prev);
+    } catch (e) {
+      console.error('Document upload failed:', e);
+      Alert.alert('Upload Failed', 'Could not upload document. Please try again.');
     } finally {
       setIsUploading(false);
     }
@@ -162,6 +273,8 @@ export default function JobDetailScreen() {
   const hasInsurance =
     job.carrier || job.adjusterName || job.adjusterPhone || job.adjusterEmail ||
     job.claimNumber || job.deductible || job.dateOfLoss || job.dateOfDiscovery;
+
+  const currentViewingFile = viewingIndex !== null ? filteredPhotos[viewingIndex] : null;
 
   return (
     <>
@@ -226,25 +339,87 @@ export default function JobDetailScreen() {
           })}
         </ScrollView>
 
-        {/* ── Inspection Photos ── */}
-        <Text style={styles.sectionTitle}>Inspection Photos</Text>
-        <TouchableOpacity
-          style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
-          onPress={handleAddPhoto}
-          disabled={isUploading}
-        >
-          <Text style={styles.photoButtonText}>
-            {isUploading ? 'Uploading...' : '📷  Add Photo'}
-          </Text>
-        </TouchableOpacity>
+        {/* ── File Sections ── */}
+        {FILE_SECTIONS.map(({ type: sectionType, label }) => {
+          const sectionFiles = (job.files ?? []).filter((f: any) => f.type === sectionType) as JobFile[];
+          const isDoc = sectionType === 'document';
+          return (
+            <View key={sectionType}>
+              <Text style={styles.sectionTitle}>{label}</Text>
 
-        {(job.files?.filter((f: any) => f.type === 'inspection').length ?? 0) > 0 && (
-          <View style={styles.photoGrid}>
-            {job.files!.filter((f: any) => f.type === 'inspection').map((f: any) => (
-              <Image key={f.id} source={{ uri: f.url }} style={styles.photoThumb} />
-            ))}
-          </View>
-        )}
+              {/* Action button — photo camera or document picker */}
+              {isDoc ? (
+                <TouchableOpacity
+                  style={[styles.docButton, isUploading && styles.photoButtonDisabled]}
+                  onPress={handleAddDocument}
+                  disabled={isUploading}
+                >
+                  <Text style={styles.docButtonText}>
+                    {isUploading ? 'Uploading...' : '📄  Add Document'}
+                  </Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
+                  onPress={() => handleAddPhoto(sectionType)}
+                  disabled={isUploading}
+                >
+                  <Text style={styles.photoButtonText}>
+                    {isUploading ? 'Uploading...' : '📷  Add Photo'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
+              {sectionFiles.length > 0 ? (
+                <View style={styles.photoGrid}>
+                  {sectionFiles.map((f, index) => (
+                    <TouchableOpacity
+                      key={f.id}
+                      style={styles.photoThumbWrapper}
+                      onPress={() => {
+                        if (isDoc) {
+                          // Documents: tap opens edit modal directly (no viewer)
+                          openFileModal(f);
+                        } else {
+                          // Photos: tap opens full-screen viewer
+                          setFilteredPhotos(sectionFiles);
+                          setViewingIndex(index);
+                        }
+                      }}
+                    >
+                      {isDoc ? (
+                        /* Document card — shows icon + filename */
+                        <View style={styles.docCard}>
+                          <Text style={styles.docCardIcon}>📄</Text>
+                          <Text style={styles.docCardName} numberOfLines={3}>
+                            {f.name ?? 'Document'}
+                          </Text>
+                          {f.isSharedWithCustomer && (
+                            <View style={styles.docSharedBadge}>
+                              <Text style={styles.sharedBadgeText}>Shared</Text>
+                            </View>
+                          )}
+                        </View>
+                      ) : (
+                        /* Photo thumbnail */
+                        <>
+                          <Image source={{ uri: f.url }} style={styles.photoThumb} />
+                          {f.isSharedWithCustomer && (
+                            <View style={styles.sharedBadge}>
+                              <Text style={styles.sharedBadgeText}>Shared</Text>
+                            </View>
+                          )}
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ) : (
+                <Text style={styles.emptyFiles}>No {label.toLowerCase()} yet.</Text>
+              )}
+            </View>
+          );
+        })}
 
         {/* ── Job Details ── */}
         <Text style={styles.sectionTitle}>Job Details</Text>
@@ -300,6 +475,144 @@ export default function JobDetailScreen() {
         ) : null}
 
       </ScrollView>
+
+      {/* ── Full-Screen Photo Viewer ── */}
+      <Modal
+        visible={viewingIndex !== null}
+        transparent={false}
+        animationType="fade"
+        onRequestClose={() => setViewingIndex(null)}
+      >
+        <View style={styles.viewerContainer}>
+
+          {/* Viewer header */}
+          <View style={styles.viewerHeader}>
+            <TouchableOpacity onPress={() => setViewingIndex(null)} hitSlop={12} style={styles.viewerHeaderBtn}>
+              <Text style={styles.viewerClose}>✕  Close</Text>
+            </TouchableOpacity>
+            <Text style={styles.viewerCounter}>
+              {viewingIndex !== null ? `${viewingIndex + 1} / ${filteredPhotos.length}` : ''}
+            </Text>
+            <TouchableOpacity
+              onPress={() => { if (currentViewingFile) openFileModal(currentViewingFile); }}
+              hitSlop={12}
+              style={styles.viewerHeaderBtn}
+            >
+              <Text style={styles.viewerEdit}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Swipeable photo pager */}
+          <FlatList
+            data={filteredPhotos}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            initialScrollIndex={viewingIndex ?? 0}
+            getItemLayout={(_, index) => ({
+              length: SCREEN_WIDTH,
+              offset: SCREEN_WIDTH * index,
+              index,
+            })}
+            onViewableItemsChanged={onViewableItemsChanged}
+            viewabilityConfig={viewabilityConfig}
+            keyExtractor={(item) => item.id}
+            style={styles.viewerFlatList}
+            renderItem={({ item }) => (
+              <ScrollView
+                style={{ width: SCREEN_WIDTH }}
+                contentContainerStyle={styles.viewerImageContainer}
+                maximumZoomScale={5}
+                minimumZoomScale={1}
+                centerContent
+                showsVerticalScrollIndicator={false}
+                showsHorizontalScrollIndicator={false}
+              >
+                <Image
+                  source={{ uri: item.url }}
+                  style={{ width: SCREEN_WIDTH, height: VIEWER_PHOTO_HEIGHT }}
+                  resizeMode="contain"
+                />
+              </ScrollView>
+            )}
+          />
+
+          {/* Viewer footer */}
+          <View style={styles.viewerFooter}>
+            {currentViewingFile?.isSharedWithCustomer && (
+              <View style={styles.viewerSharedBadge}>
+                <Text style={styles.viewerSharedText}>Shared with Customer</Text>
+              </View>
+            )}
+            <TouchableOpacity
+              style={styles.downloadBtn}
+              onPress={() => { if (currentViewingFile) handleDownloadPhoto(currentViewingFile.url); }}
+            >
+              <Text style={styles.downloadBtnText}>⬇  Download to Phone</Text>
+            </TouchableOpacity>
+          </View>
+
+        </View>
+      </Modal>
+
+      {/* ── File Edit Modal (slides up over the viewer) ── */}
+      <Modal
+        visible={!!selectedFile}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSelectedFile(null)}
+      >
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setSelectedFile(null)}
+        >
+          <TouchableOpacity style={styles.fileModalSheet} activeOpacity={1} onPress={() => {}}>
+
+            <View style={styles.fileModalHeader}>
+              <Text style={styles.fileModalTitle}>Edit File</Text>
+              <TouchableOpacity onPress={() => setSelectedFile(null)} hitSlop={12}>
+                <Text style={styles.fileModalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.fileModalLabel}>Category</Text>
+            <View style={styles.catChipRow}>
+              {FILE_SECTIONS.map(({ type: t, label }) => (
+                <TouchableOpacity
+                  key={t}
+                  style={[styles.catChip, editingType === t && styles.catChipActive]}
+                  onPress={() => setEditingType(t)}
+                >
+                  <Text style={[styles.catChipText, editingType === t && styles.catChipTextActive]}>
+                    {label.replace(' Photos', '')}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <View style={styles.switchRow}>
+              <Text style={styles.switchLabel}>Share with Customer</Text>
+              <Switch
+                value={editingShared}
+                onValueChange={setEditingShared}
+                trackColor={{ false: '#ccc', true: '#81c784' }}
+                thumbColor={editingShared ? '#2e7d32' : '#f4f3f4'}
+              />
+            </View>
+
+            <View style={styles.fileModalActions}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setSelectedFile(null)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.saveFileBtn} onPress={handleUpdateFile}>
+                <Text style={styles.saveFileBtnText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </>
   );
 }
@@ -428,7 +741,7 @@ const styles = StyleSheet.create({
     color: '#555',
   },
 
-  // Inspection Photos
+  // Photo / file sections
   photoButton: {
     backgroundColor: '#1976d2',
     borderRadius: 10,
@@ -449,11 +762,79 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 12,
   },
+  photoThumbWrapper: {
+    position: 'relative',
+  },
   photoThumb: {
     width: 100,
     height: 100,
     borderRadius: 8,
     backgroundColor: '#e0e0e0',
+  },
+  sharedBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    backgroundColor: 'rgba(46,125,50,0.85)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  sharedBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  emptyFiles: {
+    fontSize: 13,
+    color: '#bbb',
+    fontStyle: 'italic',
+    marginTop: 6,
+  },
+
+  // Document upload button (blue variant of photoButton)
+  docButton: {
+    backgroundColor: '#1565c0',
+    borderRadius: 10,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  docButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
+  },
+
+  // Document grid card
+  docCard: {
+    width: 100,
+    height: 100,
+    borderRadius: 8,
+    backgroundColor: '#e3f2fd',
+    borderWidth: 1,
+    borderColor: '#90caf9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 8,
+    gap: 4,
+  },
+  docCardIcon: {
+    fontSize: 28,
+  },
+  docCardName: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#1565c0',
+    textAlign: 'center',
+  },
+  docSharedBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    backgroundColor: 'rgba(46,125,50,0.85)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
   },
 
   // Financials
@@ -480,5 +861,182 @@ const styles = StyleSheet.create({
   },
   balanceNegative: {
     color: '#c62828',
+  },
+
+  // ── Full-Screen Viewer ──
+  viewerContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  viewerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 56, // safe area buffer
+    paddingBottom: 12,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  viewerHeaderBtn: {
+    minWidth: 64,
+  },
+  viewerClose: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  viewerCounter: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.7)',
+  },
+  viewerEdit: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#81c784',
+    textAlign: 'right',
+  },
+  viewerFlatList: {
+    flex: 1,
+  },
+  viewerImageContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+  },
+  viewerFooter: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 36,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    gap: 10,
+  },
+  viewerSharedBadge: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(46,125,50,0.85)',
+    paddingHorizontal: 14,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  viewerSharedText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  downloadBtn: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  downloadBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1a1a1a',
+  },
+
+  // ── File Edit Modal ──
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  fileModalSheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    paddingBottom: 36,
+    gap: 14,
+  },
+  fileModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  fileModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1a1a1a',
+  },
+  fileModalClose: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#555',
+  },
+  fileModalLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#888',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
+  catChipRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  catChip: {
+    paddingVertical: 9,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#ddd',
+    backgroundColor: '#f5f5f5',
+  },
+  catChipActive: {
+    backgroundColor: '#2e7d32',
+    borderColor: '#2e7d32',
+  },
+  catChipText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#555',
+  },
+  catChipTextActive: {
+    color: '#fff',
+  },
+  switchRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#f9f9f9',
+    padding: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  switchLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1a1a1a',
+  },
+  fileModalActions: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  cancelBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#ddd',
+    alignItems: 'center',
+  },
+  cancelBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#555',
+  },
+  saveFileBtn: {
+    flex: 2,
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: '#2e7d32',
+    alignItems: 'center',
+  },
+  saveFileBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
   },
 });
