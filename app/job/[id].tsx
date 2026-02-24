@@ -11,6 +11,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -54,13 +55,14 @@ const STATUSES: Job['status'][] = [
   'Completed',
 ];
 
+const AVAILABLE_TRADES = ['Roofing', 'Gutters', 'Siding', 'Windows', 'Skylights', 'Solar'];
+
 const FILE_SECTIONS: { type: JobFile['type']; label: string }[] = [
   { type: 'inspection', label: 'Inspection Photos' },
   { type: 'install', label: 'Install Photos' },
   { type: 'document', label: 'Documents' },
 ];
 
-// Height available for the photo inside the viewer (screen minus header + footer chrome)
 const VIEWER_PHOTO_HEIGHT = SCREEN_HEIGHT - 140;
 
 export default function JobDetailScreen() {
@@ -80,6 +82,14 @@ export default function JobDetailScreen() {
   // Full-screen viewer
   const [viewingIndex, setViewingIndex] = useState<number | null>(null);
   const [filteredPhotos, setFilteredPhotos] = useState<JobFile[]>([]);
+
+  // Edit details modal
+  const [isEditingDetails, setIsEditingDetails] = useState(false);
+  const [editForm, setEditForm] = useState<Partial<Job>>({});
+
+  // Add payment modal
+  const [isAddingPayment, setIsAddingPayment] = useState(false);
+  const [newPaymentAmount, setNewPaymentAmount] = useState('');
 
   // Stable refs required by FlatList — must not be recreated on render
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
@@ -156,7 +166,7 @@ export default function JobDetailScreen() {
       await updateDoc(doc(db, 'jobs', id), { files: updatedFiles });
       setJob((prev) => prev ? { ...prev, files: updatedFiles as any } : prev);
       setSelectedFile(null);
-      setViewingIndex(null); // close viewer too — photo may have moved to a different section
+      setViewingIndex(null);
     } catch (e) {
       console.error('Failed to update file:', e);
       Alert.alert('Error', 'Could not update file.');
@@ -247,6 +257,90 @@ export default function JobDetailScreen() {
       Alert.alert('Upload Failed', 'Could not upload document. Please try again.');
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleSaveDetails = async () => {
+    if (!job) return;
+    setIsUpdating(true);
+    try {
+      const contractAmount = parseFloat(String(editForm.contractAmount ?? 0).replace(/[^0-9.]/g, '')) || 0;
+      const depositAmount = parseFloat(String(editForm.depositAmount ?? 0).replace(/[^0-9.]/g, '')) || 0;
+      const isDepositPaid = job.isDepositPaid;
+      const paymentsSum = (job.payments ?? []).reduce((sum, p) => sum + p, 0);
+      const balance = contractAmount - (isDepositPaid ? depositAmount : 0) - paymentsSum;
+
+      const updates: Partial<Job> = {
+        jobName: editForm.jobName ?? '',
+        jobType: editForm.jobType ?? job.jobType,
+        trades: editForm.trades ?? job.trades,
+        measurements: editForm.measurements ?? '',
+        jobDescription: editForm.jobDescription ?? '',
+        jobNotes: editForm.jobNotes ?? '',
+        contractAmount,
+        depositAmount,
+        isDepositPaid,
+        balance,
+        carrier: editForm.carrier ?? '',
+        claimNumber: editForm.claimNumber ?? '',
+        deductible: parseFloat(String(editForm.deductible ?? 0).replace(/[^0-9.]/g, '')) || 0,
+        adjusterName: editForm.adjusterName ?? '',
+        adjusterPhone: editForm.adjusterPhone ?? '',
+        adjusterEmail: editForm.adjusterEmail ?? '',
+        dateOfLoss: editForm.dateOfLoss ?? '',
+        dateOfDiscovery: editForm.dateOfDiscovery ?? '',
+      };
+
+      await updateDoc(doc(db, 'jobs', id), updates);
+      setJob((prev) => prev ? { ...prev, ...updates } : prev);
+      setIsEditingDetails(false);
+    } catch (e) {
+      console.error('Failed to save details:', e);
+      Alert.alert('Error', 'Could not save changes.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const toggleDepositStatus = async (newValue: boolean) => {
+    if (!job || isUpdating) return;
+    setIsUpdating(true);
+    try {
+      const newBalance = job.contractAmount - (newValue ? (job.depositAmount || 0) : 0) - (job.payments || []).reduce((a, b) => a + b, 0);
+      await updateDoc(doc(db, 'jobs', id), { isDepositPaid: newValue, balance: newBalance });
+      setJob((prev) => prev ? { ...prev, isDepositPaid: newValue, balance: newBalance } : prev);
+    } catch (e) {
+      console.error('Failed to toggle deposit status:', e);
+      Alert.alert('Error', 'Could not update deposit status.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleSavePayment = async () => {
+    if (!job) return;
+    const amount = parseFloat(newPaymentAmount.replace(/[^0-9.]/g, ''));
+    if (!amount || amount <= 0) {
+      Alert.alert('Invalid Amount', 'Please enter a valid payment amount.');
+      return;
+    }
+    setIsUpdating(true);
+    try {
+      const updatedPayments = [...(job.payments ?? []), amount];
+      const contractAmount = job.contractAmount ?? 0;
+      const depositAmount = job.isDepositPaid ? (job.depositAmount ?? 0) : 0;
+      const paymentsSum = updatedPayments.reduce((sum, p) => sum + p, 0);
+      const balance = contractAmount - depositAmount - paymentsSum;
+
+      await updateDoc(doc(db, 'jobs', id), { payments: updatedPayments, balance });
+      setJob((prev) => prev ? { ...prev, payments: updatedPayments, balance } : prev);
+      setNewPaymentAmount('');
+      setIsAddingPayment(false);
+    } catch (e) {
+      console.error('Failed to save payment:', e);
+      Alert.alert('Error', 'Could not save payment.');
+    } finally {
+      setIsUpdating(false);
     }
   };
 
@@ -347,7 +441,6 @@ export default function JobDetailScreen() {
             <View key={sectionType}>
               <Text style={styles.sectionTitle}>{label}</Text>
 
-              {/* Action button — photo camera or document picker */}
               {isDoc ? (
                 <TouchableOpacity
                   style={[styles.docButton, isUploading && styles.photoButtonDisabled]}
@@ -378,17 +471,14 @@ export default function JobDetailScreen() {
                       style={styles.photoThumbWrapper}
                       onPress={() => {
                         if (isDoc) {
-                          // Documents: tap opens edit modal directly (no viewer)
                           openFileModal(f);
                         } else {
-                          // Photos: tap opens full-screen viewer
                           setFilteredPhotos(sectionFiles);
                           setViewingIndex(index);
                         }
                       }}
                     >
                       {isDoc ? (
-                        /* Document card — shows icon + filename */
                         <View style={styles.docCard}>
                           <Text style={styles.docCardIcon}>📄</Text>
                           <Text style={styles.docCardName} numberOfLines={3}>
@@ -401,7 +491,6 @@ export default function JobDetailScreen() {
                           )}
                         </View>
                       ) : (
-                        /* Photo thumbnail */
                         <>
                           <Image source={{ uri: f.url }} style={styles.photoThumb} />
                           {f.isSharedWithCustomer && (
@@ -422,7 +511,15 @@ export default function JobDetailScreen() {
         })}
 
         {/* ── Job Details ── */}
-        <Text style={styles.sectionTitle}>Job Details</Text>
+        <View style={styles.sectionTitleRow}>
+          <Text style={styles.sectionTitle}>Job Details</Text>
+          <TouchableOpacity
+            style={styles.sectionActionBtn}
+            onPress={() => { setEditForm({ ...job }); setIsEditingDetails(true); }}
+          >
+            <Text style={styles.sectionActionText}>✏️ Edit Details</Text>
+          </TouchableOpacity>
+        </View>
         <View style={styles.card}>
           <Row label="Job ID" value={job.jobId} mono />
           {job.jobName ? <Row label="Job Name" value={job.jobName} /> : null}
@@ -434,13 +531,34 @@ export default function JobDetailScreen() {
         </View>
 
         {/* ── Financials ── */}
-        <Text style={styles.sectionTitle}>Financials</Text>
+        <View style={styles.sectionTitleRow}>
+          <Text style={styles.sectionTitle}>Financials</Text>
+          <TouchableOpacity
+            style={styles.sectionActionBtn}
+            onPress={() => setIsAddingPayment(true)}
+          >
+            <Text style={styles.sectionActionText}>➕ Add Payment</Text>
+          </TouchableOpacity>
+        </View>
         <View style={styles.card}>
           <Row label="Contract" value={`$${job.contractAmount?.toFixed(2) ?? '0.00'}`} />
-          <Row
-            label="Deposit"
-            value={`$${job.depositAmount?.toFixed(2) ?? '0.00'} ${job.isDepositPaid ? '(Paid)' : '(Unpaid)'}`}
-          />
+          <View style={[rowStyles.container, { alignItems: 'center' }]}>
+            <Text style={rowStyles.label}>
+              Deposit (${job.depositAmount?.toFixed(2) ?? '0.00'})
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ fontSize: 14, fontWeight: '600', color: job.isDepositPaid ? '#2e7d32' : '#c62828' }}>
+                {job.isDepositPaid ? 'Paid' : 'Unpaid'}
+              </Text>
+              <Switch
+                value={!!job.isDepositPaid}
+                onValueChange={toggleDepositStatus}
+                disabled={isUpdating}
+                trackColor={{ false: '#ccc', true: '#81c784' }}
+                thumbColor={job.isDepositPaid ? '#2e7d32' : '#f4f3f4'}
+              />
+            </View>
+          </View>
           {job.payments?.length > 0 && (
             <>
               {job.payments.map((p, i) => (
@@ -485,7 +603,6 @@ export default function JobDetailScreen() {
       >
         <View style={styles.viewerContainer}>
 
-          {/* Viewer header */}
           <View style={styles.viewerHeader}>
             <TouchableOpacity onPress={() => setViewingIndex(null)} hitSlop={12} style={styles.viewerHeaderBtn}>
               <Text style={styles.viewerClose}>✕  Close</Text>
@@ -502,7 +619,6 @@ export default function JobDetailScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Swipeable photo pager */}
           <FlatList
             data={filteredPhotos}
             horizontal
@@ -537,7 +653,6 @@ export default function JobDetailScreen() {
             )}
           />
 
-          {/* Viewer footer */}
           <View style={styles.viewerFooter}>
             {currentViewingFile?.isSharedWithCustomer && (
               <View style={styles.viewerSharedBadge}>
@@ -555,7 +670,7 @@ export default function JobDetailScreen() {
         </View>
       </Modal>
 
-      {/* ── File Edit Modal (slides up over the viewer) ── */}
+      {/* ── File Edit Modal ── */}
       <Modal
         visible={!!selectedFile}
         transparent
@@ -612,6 +727,272 @@ export default function JobDetailScreen() {
 
           </TouchableOpacity>
         </TouchableOpacity>
+      </Modal>
+
+      {/* ── Edit Details Modal ── */}
+      <Modal
+        visible={isEditingDetails}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setIsEditingDetails(false)}
+      >
+        <View style={styles.editModalOverlay}>
+          <View style={styles.editModalSheet}>
+
+            <View style={styles.editModalHeader}>
+              <TouchableOpacity onPress={() => setIsEditingDetails(false)}>
+                <Text style={styles.editModalCancel}>Cancel</Text>
+              </TouchableOpacity>
+              <Text style={styles.editModalTitle}>Edit Details</Text>
+              <TouchableOpacity onPress={handleSaveDetails} disabled={isUpdating}>
+                <Text style={[styles.editModalSave, isUpdating && styles.editModalSaveDisabled]}>
+                  {isUpdating ? 'Saving…' : 'Save'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.editModalScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+
+              {/* ── Job ── */}
+              <Text style={styles.editSectionLabel}>Job</Text>
+
+              <Text style={styles.inputLabel}>Job Name</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.jobName ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, jobName: t }))}
+                placeholder="Job name"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Job Type</Text>
+              <View style={styles.chipRow}>
+                {(['Retail', 'Insurance'] as const).map((type) => (
+                  <TouchableOpacity
+                    key={type}
+                    style={[styles.typeChip, editForm.jobType === type && styles.typeChipActive]}
+                    onPress={() => setEditForm((p) => ({ ...p, jobType: type }))}
+                  >
+                    <Text style={[styles.typeChipText, editForm.jobType === type && styles.typeChipTextActive]}>
+                      {type}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.inputLabel}>Trades</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                {AVAILABLE_TRADES.map((trade) => {
+                  const isActive = editForm?.trades?.includes(trade);
+                  return (
+                    <TouchableOpacity
+                      key={trade}
+                      style={[styles.typeChip, isActive && styles.typeChipActive]}
+                      onPress={() =>
+                        setEditForm((p) => {
+                          const current = p.trades ?? [];
+                          return {
+                            ...p,
+                            trades: current.includes(trade)
+                              ? current.filter((t) => t !== trade)
+                              : [...current, trade],
+                          };
+                        })
+                      }
+                    >
+                      <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
+                        {trade}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.inputLabel}>Measurements</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.measurements ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, measurements: t }))}
+                placeholder="Square footage, etc."
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Description</Text>
+              <TextInput
+                style={[styles.textInput, styles.textInputMultiline]}
+                value={editForm.jobDescription ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, jobDescription: t }))}
+                placeholder="Job description"
+                placeholderTextColor="#aaa"
+                multiline
+                numberOfLines={3}
+              />
+
+              <Text style={styles.inputLabel}>Job Notes</Text>
+              <TextInput
+                style={[styles.textInput, styles.textInputMultiline]}
+                value={editForm.jobNotes ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, jobNotes: t }))}
+                placeholder="Internal notes"
+                placeholderTextColor="#aaa"
+                multiline
+                numberOfLines={3}
+              />
+
+              {/* ── Financials ── */}
+              <Text style={styles.editSectionLabel}>Financials</Text>
+
+              <Text style={styles.inputLabel}>Contract Amount ($)</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.contractAmount != null ? String(editForm.contractAmount) : ''}
+                onChangeText={(t) =>
+                  setEditForm((p) => ({ ...p, contractAmount: parseFloat(t.replace(/[^0-9.]/g, '')) || 0 }))
+                }
+                keyboardType="decimal-pad"
+                placeholder="0.00"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Deposit Amount ($)</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.depositAmount != null ? String(editForm.depositAmount) : ''}
+                onChangeText={(t) =>
+                  setEditForm((p) => ({ ...p, depositAmount: parseFloat(t.replace(/[^0-9.]/g, '')) || 0 }))
+                }
+                keyboardType="decimal-pad"
+                placeholder="0.00"
+                placeholderTextColor="#aaa"
+              />
+
+              {/* ── Insurance ── */}
+              <Text style={styles.editSectionLabel}>Insurance</Text>
+
+              <Text style={styles.inputLabel}>Carrier</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.carrier ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, carrier: t }))}
+                placeholder="Insurance carrier"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Claim #</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.claimNumber ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, claimNumber: t }))}
+                placeholder="Claim number"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Deductible ($)</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.deductible ? String(editForm.deductible) : ''}
+                onChangeText={(t) =>
+                  setEditForm((p) => ({ ...p, deductible: parseFloat(t.replace(/[^0-9.]/g, '')) || 0 }))
+                }
+                keyboardType="decimal-pad"
+                placeholder="0.00"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Adjuster Name</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.adjusterName ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, adjusterName: t }))}
+                placeholder="Adjuster full name"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Adjuster Phone</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.adjusterPhone ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, adjusterPhone: t }))}
+                keyboardType="phone-pad"
+                placeholder="Phone number"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Adjuster Email</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.adjusterEmail ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, adjusterEmail: t }))}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                placeholder="Email address"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Date of Loss</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.dateOfLoss ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, dateOfLoss: t }))}
+                placeholder="e.g. 2024-01-15"
+                placeholderTextColor="#aaa"
+              />
+
+              <Text style={styles.inputLabel}>Date of Discovery</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editForm.dateOfDiscovery ?? ''}
+                onChangeText={(t) => setEditForm((p) => ({ ...p, dateOfDiscovery: t }))}
+                placeholder="e.g. 2024-01-20"
+                placeholderTextColor="#aaa"
+              />
+
+              <View style={{ height: 40 }} />
+            </ScrollView>
+
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Add Payment Modal ── */}
+      <Modal
+        visible={isAddingPayment}
+        transparent
+        animationType="fade"
+        onRequestClose={() => { setIsAddingPayment(false); setNewPaymentAmount(''); }}
+      >
+        <View style={styles.paymentModalOverlay}>
+          <View style={styles.paymentModalCard}>
+            <Text style={styles.paymentModalTitle}>Add Payment</Text>
+            <Text style={styles.inputLabel}>Amount ($)</Text>
+            <TextInput
+              style={styles.textInput}
+              value={newPaymentAmount}
+              onChangeText={setNewPaymentAmount}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              placeholderTextColor="#aaa"
+              autoFocus
+            />
+            <View style={styles.fileModalActions}>
+              <TouchableOpacity
+                style={styles.cancelBtn}
+                onPress={() => { setIsAddingPayment(false); setNewPaymentAmount(''); }}
+              >
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.saveFileBtn, isUpdating && styles.photoButtonDisabled]}
+                onPress={handleSavePayment}
+                disabled={isUpdating}
+              >
+                <Text style={styles.saveFileBtnText}>
+                  {isUpdating ? 'Saving…' : 'Save Payment'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
       </Modal>
     </>
   );
@@ -698,8 +1079,22 @@ const styles = StyleSheet.create({
     color: '#888',
     textTransform: 'uppercase',
     letterSpacing: 0.8,
-    marginBottom: 6,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     marginTop: 20,
+    marginBottom: 6,
+  },
+  sectionActionBtn: {
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+  },
+  sectionActionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2e7d32',
   },
   card: {
     backgroundColor: '#fff',
@@ -732,7 +1127,6 @@ const styles = StyleSheet.create({
   pipelineChipText: {
     fontSize: 13,
     fontWeight: '600',
-    whiteSpace: 'nowrap' as any,
   },
   pipelineChipTextActive: {
     color: '#fff',
@@ -792,7 +1186,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
 
-  // Document upload button (blue variant of photoButton)
+  // Document upload button
   docButton: {
     backgroundColor: '#1565c0',
     borderRadius: 10,
@@ -873,7 +1267,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: 56, // safe area buffer
+    paddingTop: 56,
     paddingBottom: 12,
     backgroundColor: 'rgba(0,0,0,0.6)',
   },
@@ -1004,6 +1398,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#e0e0e0',
+    marginTop: 12,
   },
   switchLabel: {
     fontSize: 15,
@@ -1038,5 +1433,128 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#fff',
+  },
+
+  // ── Edit Details Modal ──
+  editModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  editModalSheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '92%',
+  },
+  editModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  editModalTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#1a1a1a',
+  },
+  editModalCancel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#555',
+    minWidth: 60,
+  },
+  editModalSave: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2e7d32',
+    minWidth: 60,
+    textAlign: 'right',
+  },
+  editModalSaveDisabled: {
+    opacity: 0.4,
+  },
+  editModalScroll: {
+    paddingHorizontal: 20,
+  },
+  editSectionLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#888',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginTop: 24,
+    marginBottom: 4,
+  },
+  inputLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#555',
+    marginTop: 14,
+    marginBottom: 6,
+  },
+  textInput: {
+    backgroundColor: '#f9f9f9',
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: '#1a1a1a',
+  },
+  textInputMultiline: {
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  chipRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 6,
+  },
+  typeChip: {
+    paddingVertical: 9,
+    paddingHorizontal: 20,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#ddd',
+    backgroundColor: '#f5f5f5',
+  },
+  typeChipActive: {
+    backgroundColor: '#2e7d32',
+    borderColor: '#2e7d32',
+  },
+  typeChipText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#555',
+  },
+  typeChipTextActive: {
+    color: '#fff',
+  },
+
+  // ── Add Payment Modal ──
+  paymentModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  paymentModalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    gap: 4,
+  },
+  paymentModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1a1a1a',
+    marginBottom: 8,
   },
 });
