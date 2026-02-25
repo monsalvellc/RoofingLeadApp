@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -13,7 +13,7 @@ import {
   View,
 } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
-import { doc, setDoc, collection } from 'firebase/firestore';
+import { collection, doc, onSnapshot, query, setDoc, where } from 'firebase/firestore';
 import { db } from '../config/firebaseConfig';
 import * as Location from 'expo-location';
 import { JobFile, LeadFile } from '../types';
@@ -63,6 +63,11 @@ export default function AddLeadScreen() {
   const { user, userProfile } = useAuth();
 
   const [isSaving, setIsSaving] = useState(false);
+
+  // Customer search / existing customer selection
+  const [existingCustomers, setExistingCustomers] = useState<any[]>([]);
+  const [filteredCustomers, setFilteredCustomers] = useState<any[]>([]);
+  const [selectedExistingCustomer, setSelectedExistingCustomer] = useState<any | null>(null);
 
   // Customer
   const [name, setName] = useState('');
@@ -143,6 +148,56 @@ export default function AddLeadScreen() {
     setNewPayment('');
   };
 
+  // Fetch all customers for this company
+  useEffect(() => {
+    if (!userProfile?.companyId) return;
+    const q = query(
+      collection(db, 'customers'),
+      where('companyId', '==', userProfile.companyId),
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      setExistingCustomers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, [userProfile?.companyId]);
+
+  // Filter customers as the name input changes
+  useEffect(() => {
+    if (!name.trim() || selectedExistingCustomer) {
+      setFilteredCustomers([]);
+      return;
+    }
+    const lower = name.toLowerCase();
+    setFilteredCustomers(
+      existingCustomers.filter((c) =>
+        `${c.firstName} ${c.lastName}`.toLowerCase().includes(lower),
+      ),
+    );
+  }, [name, existingCustomers, selectedExistingCustomer]);
+
+  const handleSelectCustomer = (customer: any) => {
+    setSelectedExistingCustomer(customer);
+    setFilteredCustomers([]);
+    setName(`${customer.firstName} ${customer.lastName}`.trim());
+    setPhone(customer.phone || '');
+    setAddress(customer.address || '');
+    setEmail(customer.email || '');
+    setLeadSource(customer.leadSource || '');
+    setAlternateAddress(customer.alternateAddress || '');
+    setNotes(customer.notes || '');
+  };
+
+  const handleClearCustomerSelection = () => {
+    setSelectedExistingCustomer(null);
+    setName('');
+    setPhone('');
+    setAddress('');
+    setEmail('');
+    setLeadSource('');
+    setAlternateAddress('');
+    setNotes('');
+  };
+
   const handleSave = async () => {
     if (isSaving) { console.log('Already saving, blocking double fire.'); return; }
     setIsSaving(true);
@@ -193,14 +248,15 @@ export default function AddLeadScreen() {
     }
 
     // Step B & C: Create Firestore references with auto-generated IDs
-    const customerRef = doc(collection(db, 'customers'));
+    const customerRef = selectedExistingCustomer ? null : doc(collection(db, 'customers'));
     const jobRef = doc(collection(db, 'jobs'));
+    const customerId = selectedExistingCustomer ? selectedExistingCustomer.id : customerRef!.id;
 
-    // Step D: Construct Customer object
+    // Step D: Construct Customer object (only when creating a new customer)
     const companyId = userProfile?.companyId || 'UNKNOWN_COMPANY';
 
-    const newCustomer = {
-      id: customerRef.id,
+    const newCustomer = selectedExistingCustomer ? null : {
+      id: customerRef!.id,
       companyId,
       firstName,
       lastName,
@@ -219,7 +275,7 @@ export default function AddLeadScreen() {
     // Step E: Construct Job object
     const newJob = {
       id: jobRef.id,
-      customerId: customerRef.id,
+      customerId,
       companyId,
       jobId,
       assignedUserIds: user?.uid ? [user.uid] : [],
@@ -261,12 +317,14 @@ export default function AddLeadScreen() {
 
     console.log('--- STARTING SAVE PROCESS ---');
     console.log('1. DB Connection:', db ? 'Valid' : 'Missing');
-    console.log('2. Customer ID:', customerRef.id);
+    console.log('2. Customer ID:', customerId, selectedExistingCustomer ? '(existing)' : '(new)');
     console.log('3. Job ID:', jobRef.id);
 
     try {
-      // Step F: Write both documents
-      await setDoc(customerRef, newCustomer);
+      // Step F: Write documents — skip customer write if linking to existing
+      if (newCustomer && customerRef) {
+        await setDoc(customerRef, newCustomer);
+      }
       await setDoc(jobRef, newJob);
       console.log('4. WRITE SUCCESS!');
 
@@ -348,13 +406,44 @@ export default function AddLeadScreen() {
           {/* ── Customer Info ── */}
           <Text style={styles.sectionTitle}>Customer Info</Text>
           <View style={styles.section}>
-            <TextInput
-              style={[styles.input, !name.trim() && styles.inputRequired]}
-              placeholder="Name *"
-              placeholderTextColor="#999"
-              value={name}
-              onChangeText={setName}
-            />
+            <View>
+              <TextInput
+                style={[styles.input, !name.trim() && styles.inputRequired]}
+                placeholder="Name *"
+                placeholderTextColor="#999"
+                value={name}
+                onChangeText={(text) => {
+                  setName(text);
+                  if (selectedExistingCustomer) setSelectedExistingCustomer(null);
+                }}
+              />
+              {filteredCustomers.length > 0 && (
+                <View style={styles.customerDropdown}>
+                  {filteredCustomers.map((c) => (
+                    <Pressable
+                      key={c.id}
+                      style={styles.customerDropdownItem}
+                      onPress={() => handleSelectCustomer(c)}
+                    >
+                      <Text style={styles.customerDropdownName}>
+                        {c.firstName} {c.lastName}
+                      </Text>
+                      <Text style={styles.customerDropdownAddress}>{c.address}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+              {selectedExistingCustomer && (
+                <View style={styles.selectedCustomerBadge}>
+                  <Text style={styles.selectedCustomerText}>
+                    ✓ Existing customer linked — no duplicate will be created
+                  </Text>
+                  <Pressable onPress={handleClearCustomerSelection}>
+                    <Text style={styles.clearBtnText}>Clear</Text>
+                  </Pressable>
+                </View>
+              )}
+            </View>
             <TextInput
               style={styles.input}
               placeholder="Phone (###) ###-####"
@@ -944,6 +1033,61 @@ const styles = StyleSheet.create({
   },
   chipTextActive: {
     color: '#2e7d32',
+  },
+
+  // Customer search autocomplete
+  customerDropdown: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 10,
+    overflow: 'hidden',
+    marginTop: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  customerDropdownItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+    backgroundColor: '#fff',
+  },
+  customerDropdownName: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1a1a1a',
+  },
+  customerDropdownAddress: {
+    fontSize: 13,
+    color: '#777',
+    marginTop: 2,
+  },
+  selectedCustomerBadge: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#e8f5e9',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: '#c8e6c9',
+    marginTop: 6,
+  },
+  selectedCustomerText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2e7d32',
+    flex: 1,
+  },
+  clearBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#c62828',
+    marginLeft: 10,
   },
 
   // Save button

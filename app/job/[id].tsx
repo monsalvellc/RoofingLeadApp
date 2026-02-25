@@ -15,8 +15,8 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Stack, useLocalSearchParams } from 'expo-router';
-import { arrayUnion, doc, getDoc, updateDoc } from 'firebase/firestore';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { addDoc, arrayUnion, collection, doc, getDoc, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
@@ -67,6 +67,7 @@ const VIEWER_PHOTO_HEIGHT = SCREEN_HEIGHT - 140;
 
 export default function JobDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
 
   const [job, setJob] = useState<Job | null>(null);
   const [customer, setCustomer] = useState<Customer | null>(null);
@@ -90,6 +91,13 @@ export default function JobDetailScreen() {
   // Add payment modal
   const [isAddingPayment, setIsAddingPayment] = useState(false);
   const [newPaymentAmount, setNewPaymentAmount] = useState('');
+
+  // Customer's other jobs
+  const [customerJobs, setCustomerJobs] = useState<any[]>([]);
+  const [isCreatingJob, setIsCreatingJob] = useState(false);
+
+  // Job tabs
+  const [activeJobTab, setActiveJobTab] = useState<'details' | 'media'>('details');
 
   // Stable refs required by FlatList — must not be recreated on render
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
@@ -126,6 +134,43 @@ export default function JobDetailScreen() {
 
     fetchData();
   }, [id]);
+
+  useEffect(() => {
+    if (!job?.customerId) return;
+    const q = query(
+      collection(db, 'jobs'),
+      where('customerId', '==', job.customerId),
+      orderBy('createdAt', 'desc'),
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      setCustomerJobs(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, [job?.customerId]);
+
+  const handleCreateAdditionalJob = async () => {
+    if (!job || isCreatingJob) return;
+    setIsCreatingJob(true);
+    try {
+      const newJobPayload = {
+        companyId: job.companyId,
+        customerId: job.customerId,
+        customerName: job.customerName,
+        customerPhone: job.customerPhone || '',
+        assignedUserIds: job.assignedUserIds || [],
+        status: 'Lead',
+        contractAmount: 0,
+        balance: 0,
+        createdAt: Date.now(),
+      };
+      const docRef = await addDoc(collection(db, 'jobs'), newJobPayload);
+      router.setParams({ id: docRef.id });
+    } catch (e) {
+      console.error('Failed to create additional job:', e);
+    } finally {
+      setIsCreatingJob(false);
+    }
+  };
 
   const updateJobStatus = async (newStatus: Job['status']) => {
     if (!job || isUpdating) return;
@@ -375,17 +420,7 @@ export default function JobDetailScreen() {
       <Stack.Screen options={{ title: customerName || job.jobName || job.jobId }} />
       <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
 
-        {/* ── Status Banner ── */}
-        <View
-          style={[
-            styles.statusBanner,
-            { backgroundColor: STATUS_COLORS[job.status] ?? '#999' },
-          ]}
-        >
-          <Text style={styles.statusBannerText}>{job.status}</Text>
-        </View>
-
-        {/* ── Customer Profile ── */}
+        {/* ── Customer Profile (always visible) ── */}
         <Text style={styles.sectionTitle}>Customer</Text>
         <View style={styles.card}>
           <Row label="Name" value={customerName} />
@@ -397,200 +432,278 @@ export default function JobDetailScreen() {
           {customer?.notes ? <Row label="Notes" value={customer.notes} /> : null}
         </View>
 
-        {/* ── Pipeline Status ── */}
-        <Text style={styles.sectionTitle}>Pipeline Status</Text>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.pipelineRow}
-        >
-          {STATUSES.map((s) => {
-            const isActive = job.status === s;
-            const color = STATUS_COLORS[s] ?? '#999';
-            return (
+        {/* ── Customer's Projects (always visible) ── */}
+        {customerJobs.length > 0 && (
+          <>
+            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>Customer's Projects</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.projectsRow}
+            >
+              {customerJobs.map((cj) => {
+                const isCurrent = cj.id === id;
+                const chipColor = STATUS_COLORS[cj.status] ?? '#999';
+                const date = cj.createdAt
+                  ? new Date(cj.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
+                  : '—';
+                return (
+                  <Pressable
+                    key={cj.id}
+                    style={[
+                      styles.projectPill,
+                      isCurrent
+                        ? { backgroundColor: chipColor, borderColor: chipColor }
+                        : { backgroundColor: '#f0f0f0', borderColor: '#ddd' },
+                    ]}
+                    onPress={() => { if (!isCurrent) router.setParams({ id: cj.id }); }}
+                  >
+                    <Text style={[styles.projectPillDate, isCurrent && { color: 'rgba(255,255,255,0.8)' }]}>
+                      {date}
+                    </Text>
+                    <Text style={[styles.projectPillStatus, isCurrent && { color: '#fff' }]}>
+                      {cj.status}
+                    </Text>
+                    {isCurrent && <View style={styles.projectPillCurrentDot} />}
+                  </Pressable>
+                );
+              })}
               <Pressable
-                key={s}
-                style={[
-                  styles.pipelineChip,
-                  isActive
-                    ? { backgroundColor: color, borderColor: color }
-                    : { backgroundColor: '#f0f0f0', borderColor: '#ddd' },
-                  isUpdating && styles.pipelineChipDisabled,
-                ]}
-                onPress={() => updateJobStatus(s)}
-                disabled={isUpdating}
+                style={[styles.projectPill, styles.projectPillAdd, isCreatingJob && { opacity: 0.5 }]}
+                onPress={handleCreateAdditionalJob}
+                disabled={isCreatingJob}
               >
-                <Text
-                  style={[
-                    styles.pipelineChipText,
-                    isActive ? styles.pipelineChipTextActive : styles.pipelineChipTextInactive,
-                  ]}
-                >
-                  {s}
+                <Text style={styles.projectPillAddText}>
+                  {isCreatingJob ? '…' : '➕ Add Job'}
                 </Text>
               </Pressable>
-            );
-          })}
-        </ScrollView>
-
-        {/* ── File Sections ── */}
-        {FILE_SECTIONS.map(({ type: sectionType, label }) => {
-          const sectionFiles = (job.files ?? []).filter((f: any) => f.type === sectionType) as JobFile[];
-          const isDoc = sectionType === 'document';
-          return (
-            <View key={sectionType}>
-              <Text style={styles.sectionTitle}>{label}</Text>
-
-              {isDoc ? (
-                <TouchableOpacity
-                  style={[styles.docButton, isUploading && styles.photoButtonDisabled]}
-                  onPress={handleAddDocument}
-                  disabled={isUploading}
-                >
-                  <Text style={styles.docButtonText}>
-                    {isUploading ? 'Uploading...' : '📄  Add Document'}
-                  </Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity
-                  style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
-                  onPress={() => handleAddPhoto(sectionType)}
-                  disabled={isUploading}
-                >
-                  <Text style={styles.photoButtonText}>
-                    {isUploading ? 'Uploading...' : '📷  Add Photo'}
-                  </Text>
-                </TouchableOpacity>
-              )}
-
-              {sectionFiles.length > 0 ? (
-                <View style={styles.photoGrid}>
-                  {sectionFiles.map((f, index) => (
-                    <TouchableOpacity
-                      key={f.id}
-                      style={styles.photoThumbWrapper}
-                      onPress={() => {
-                        if (isDoc) {
-                          openFileModal(f);
-                        } else {
-                          setFilteredPhotos(sectionFiles);
-                          setViewingIndex(index);
-                        }
-                      }}
-                    >
-                      {isDoc ? (
-                        <View style={styles.docCard}>
-                          <Text style={styles.docCardIcon}>📄</Text>
-                          <Text style={styles.docCardName} numberOfLines={3}>
-                            {f.name ?? 'Document'}
-                          </Text>
-                          {f.isSharedWithCustomer && (
-                            <View style={styles.docSharedBadge}>
-                              <Text style={styles.sharedBadgeText}>Shared</Text>
-                            </View>
-                          )}
-                        </View>
-                      ) : (
-                        <>
-                          <Image source={{ uri: f.url }} style={styles.photoThumb} />
-                          {f.isSharedWithCustomer && (
-                            <View style={styles.sharedBadge}>
-                              <Text style={styles.sharedBadgeText}>Shared</Text>
-                            </View>
-                          )}
-                        </>
-                      )}
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              ) : (
-                <Text style={styles.emptyFiles}>No {label.toLowerCase()} yet.</Text>
-              )}
-            </View>
-          );
-        })}
-
-        {/* ── Job Details ── */}
-        <View style={styles.sectionTitleRow}>
-          <Text style={styles.sectionTitle}>Job Details</Text>
-          <TouchableOpacity
-            style={styles.sectionActionBtn}
-            onPress={() => { setEditForm({ ...job }); setIsEditingDetails(true); }}
-          >
-            <Text style={styles.sectionActionText}>✏️ Edit Details</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.card}>
-          <Row label="Job ID" value={job.jobId} mono />
-          {job.jobName ? <Row label="Job Name" value={job.jobName} /> : null}
-          <Row label="Job Type" value={job.jobType} />
-          <Row label="Trades" value={job.trades?.join(', ') || '—'} />
-          {job.measurements ? <Row label="Measurements" value={job.measurements} /> : null}
-          {job.jobDescription ? <Row label="Description" value={job.jobDescription} /> : null}
-          {job.jobNotes ? <Row label="Job Notes" value={job.jobNotes} /> : null}
-        </View>
-
-        {/* ── Financials ── */}
-        <View style={styles.sectionTitleRow}>
-          <Text style={styles.sectionTitle}>Financials</Text>
-          <TouchableOpacity
-            style={styles.sectionActionBtn}
-            onPress={() => setIsAddingPayment(true)}
-          >
-            <Text style={styles.sectionActionText}>➕ Add Payment</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.card}>
-          <Row label="Contract" value={`$${job.contractAmount?.toFixed(2) ?? '0.00'}`} />
-          <View style={[rowStyles.container, { alignItems: 'center' }]}>
-            <Text style={rowStyles.label}>
-              Deposit (${job.depositAmount?.toFixed(2) ?? '0.00'})
-            </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={{ fontSize: 14, fontWeight: '600', color: job.isDepositPaid ? '#2e7d32' : '#c62828' }}>
-                {job.isDepositPaid ? 'Paid' : 'Unpaid'}
-              </Text>
-              <Switch
-                value={!!job.isDepositPaid}
-                onValueChange={toggleDepositStatus}
-                disabled={isUpdating}
-                trackColor={{ false: '#ccc', true: '#81c784' }}
-                thumbColor={job.isDepositPaid ? '#2e7d32' : '#f4f3f4'}
-              />
-            </View>
-          </View>
-          {job.payments?.length > 0 && (
-            <>
-              {job.payments.map((p, i) => (
-                <Row key={i} label={`Payment ${i + 1}`} value={`$${p.toFixed(2)}`} />
-              ))}
-            </>
-          )}
-          <View style={styles.divider} />
-          <View style={styles.balanceRow}>
-            <Text style={styles.balanceLabel}>Balance</Text>
-            <Text style={[styles.balanceValue, (job.balance ?? 0) < 0 && styles.balanceNegative]}>
-              ${job.balance?.toFixed(2) ?? '0.00'}
-            </Text>
-          </View>
-        </View>
-
-        {/* ── Insurance Details (conditional) ── */}
-        {hasInsurance ? (
-          <>
-            <Text style={styles.sectionTitle}>Insurance Details</Text>
-            <View style={styles.card}>
-              {job.carrier ? <Row label="Carrier" value={job.carrier} /> : null}
-              {job.claimNumber ? <Row label="Claim #" value={job.claimNumber} /> : null}
-              {job.deductible ? <Row label="Deductible" value={`$${job.deductible.toFixed(2)}`} /> : null}
-              {job.adjusterName ? <Row label="Adjuster" value={job.adjusterName} /> : null}
-              {job.adjusterPhone ? <Row label="Adj. Phone" value={job.adjusterPhone} /> : null}
-              {job.adjusterEmail ? <Row label="Adj. Email" value={job.adjusterEmail} /> : null}
-              {job.dateOfLoss ? <Row label="Date of Loss" value={job.dateOfLoss} /> : null}
-              {job.dateOfDiscovery ? <Row label="Date of Discovery" value={job.dateOfDiscovery} /> : null}
-            </View>
+            </ScrollView>
           </>
-        ) : null}
+        )}
+
+        {/* ── Job Tab Bar ── */}
+        <View style={styles.jobTabRow}>
+          <Pressable
+            style={[styles.jobTabBtn, activeJobTab === 'details' && styles.jobTabBtnActive]}
+            onPress={() => setActiveJobTab('details')}
+          >
+            <Text style={[styles.jobTabBtnText, activeJobTab === 'details' && styles.jobTabBtnTextActive]}>
+              Job Details
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.jobTabBtn, activeJobTab === 'media' && styles.jobTabBtnActive]}
+            onPress={() => setActiveJobTab('media')}
+          >
+            <Text style={[styles.jobTabBtnText, activeJobTab === 'media' && styles.jobTabBtnTextActive]}>
+              Media & Docs
+            </Text>
+          </Pressable>
+        </View>
+
+        {/* ── Details Tab ── */}
+        {activeJobTab === 'details' && (
+          <>
+            {/* Pipeline Status */}
+            <Text style={styles.sectionTitle}>Pipeline Status</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.pipelineRow}
+            >
+              {STATUSES.map((s) => {
+                const isActive = job.status === s;
+                const color = STATUS_COLORS[s] ?? '#999';
+                return (
+                  <Pressable
+                    key={s}
+                    style={[
+                      styles.pipelineChip,
+                      isActive
+                        ? { backgroundColor: color, borderColor: color }
+                        : { backgroundColor: '#f0f0f0', borderColor: '#ddd' },
+                      isUpdating && styles.pipelineChipDisabled,
+                    ]}
+                    onPress={() => updateJobStatus(s)}
+                    disabled={isUpdating}
+                  >
+                    <Text
+                      style={[
+                        styles.pipelineChipText,
+                        isActive ? styles.pipelineChipTextActive : styles.pipelineChipTextInactive,
+                      ]}
+                    >
+                      {s}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+
+            {/* Job Details */}
+            <View style={styles.sectionTitleRow}>
+              <Text style={styles.sectionTitle}>Job Details</Text>
+              <TouchableOpacity
+                style={styles.sectionActionBtn}
+                onPress={() => { setEditForm({ ...job }); setIsEditingDetails(true); }}
+              >
+                <Text style={styles.sectionActionText}>✏️ Edit Details</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.card}>
+              <Row label="Job ID" value={job.jobId} mono />
+              {job.jobName ? <Row label="Job Name" value={job.jobName} /> : null}
+              <Row label="Job Type" value={job.jobType} />
+              <Row label="Trades" value={job.trades?.join(', ') || '—'} />
+              {job.measurements ? <Row label="Measurements" value={job.measurements} /> : null}
+              {job.jobDescription ? <Row label="Description" value={job.jobDescription} /> : null}
+              {job.jobNotes ? <Row label="Job Notes" value={job.jobNotes} /> : null}
+            </View>
+
+            {/* Financials */}
+            <View style={styles.sectionTitleRow}>
+              <Text style={styles.sectionTitle}>Financials</Text>
+              <TouchableOpacity
+                style={styles.sectionActionBtn}
+                onPress={() => setIsAddingPayment(true)}
+              >
+                <Text style={styles.sectionActionText}>➕ Add Payment</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.card}>
+              <Row label="Contract" value={`$${job.contractAmount?.toFixed(2) ?? '0.00'}`} />
+              <View style={[rowStyles.container, { alignItems: 'center' }]}>
+                <Text style={rowStyles.label}>
+                  Deposit (${job.depositAmount?.toFixed(2) ?? '0.00'})
+                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '600', color: job.isDepositPaid ? '#2e7d32' : '#c62828' }}>
+                    {job.isDepositPaid ? 'Paid' : 'Unpaid'}
+                  </Text>
+                  <Switch
+                    value={!!job.isDepositPaid}
+                    onValueChange={toggleDepositStatus}
+                    disabled={isUpdating}
+                    trackColor={{ false: '#ccc', true: '#81c784' }}
+                    thumbColor={job.isDepositPaid ? '#2e7d32' : '#f4f3f4'}
+                  />
+                </View>
+              </View>
+              {job.payments?.length > 0 && (
+                <>
+                  {job.payments.map((p, i) => (
+                    <Row key={i} label={`Payment ${i + 1}`} value={`$${p.toFixed(2)}`} />
+                  ))}
+                </>
+              )}
+              <View style={styles.divider} />
+              <View style={styles.balanceRow}>
+                <Text style={styles.balanceLabel}>Balance</Text>
+                <Text style={[styles.balanceValue, (job.balance ?? 0) < 0 && styles.balanceNegative]}>
+                  ${job.balance?.toFixed(2) ?? '0.00'}
+                </Text>
+              </View>
+            </View>
+
+            {/* Insurance Details */}
+            {hasInsurance ? (
+              <>
+                <Text style={styles.sectionTitle}>Insurance Details</Text>
+                <View style={styles.card}>
+                  {job.carrier ? <Row label="Carrier" value={job.carrier} /> : null}
+                  {job.claimNumber ? <Row label="Claim #" value={job.claimNumber} /> : null}
+                  {job.deductible ? <Row label="Deductible" value={`$${job.deductible.toFixed(2)}`} /> : null}
+                  {job.adjusterName ? <Row label="Adjuster" value={job.adjusterName} /> : null}
+                  {job.adjusterPhone ? <Row label="Adj. Phone" value={job.adjusterPhone} /> : null}
+                  {job.adjusterEmail ? <Row label="Adj. Email" value={job.adjusterEmail} /> : null}
+                  {job.dateOfLoss ? <Row label="Date of Loss" value={job.dateOfLoss} /> : null}
+                  {job.dateOfDiscovery ? <Row label="Date of Discovery" value={job.dateOfDiscovery} /> : null}
+                </View>
+              </>
+            ) : null}
+          </>
+        )}
+
+        {/* ── Media Tab ── */}
+        {activeJobTab === 'media' && (
+          <>
+            {FILE_SECTIONS.map(({ type: sectionType, label }) => {
+              const sectionFiles = (job.files ?? []).filter((f: any) => f.type === sectionType) as JobFile[];
+              const isDoc = sectionType === 'document';
+              return (
+                <View key={sectionType}>
+                  <Text style={styles.sectionTitle}>{label}</Text>
+
+                  {isDoc ? (
+                    <TouchableOpacity
+                      style={[styles.docButton, isUploading && styles.photoButtonDisabled]}
+                      onPress={handleAddDocument}
+                      disabled={isUploading}
+                    >
+                      <Text style={styles.docButtonText}>
+                        {isUploading ? 'Uploading...' : '📄  Add Document'}
+                      </Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
+                      onPress={() => handleAddPhoto(sectionType)}
+                      disabled={isUploading}
+                    >
+                      <Text style={styles.photoButtonText}>
+                        {isUploading ? 'Uploading...' : '📷  Add Photo'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {sectionFiles.length > 0 ? (
+                    <View style={styles.photoGrid}>
+                      {sectionFiles.map((f, index) => (
+                        <TouchableOpacity
+                          key={f.id}
+                          style={styles.photoThumbWrapper}
+                          onPress={() => {
+                            if (isDoc) {
+                              openFileModal(f);
+                            } else {
+                              setFilteredPhotos(sectionFiles);
+                              setViewingIndex(index);
+                            }
+                          }}
+                        >
+                          {isDoc ? (
+                            <View style={styles.docCard}>
+                              <Text style={styles.docCardIcon}>📄</Text>
+                              <Text style={styles.docCardName} numberOfLines={3}>
+                                {f.name ?? 'Document'}
+                              </Text>
+                              {f.isSharedWithCustomer && (
+                                <View style={styles.docSharedBadge}>
+                                  <Text style={styles.sharedBadgeText}>Shared</Text>
+                                </View>
+                              )}
+                            </View>
+                          ) : (
+                            <>
+                              <Image source={{ uri: f.url }} style={styles.photoThumb} />
+                              {f.isSharedWithCustomer && (
+                                <View style={styles.sharedBadge}>
+                                  <Text style={styles.sharedBadgeText}>Shared</Text>
+                                </View>
+                              )}
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  ) : (
+                    <Text style={styles.emptyFiles}>No {label.toLowerCase()} yet.</Text>
+                  )}
+                </View>
+              );
+            })}
+          </>
+        )}
 
       </ScrollView>
 
@@ -1533,6 +1646,77 @@ const styles = StyleSheet.create({
     color: '#555',
   },
   typeChipTextActive: {
+    color: '#fff',
+  },
+
+  // ── Customer's Projects ──
+  projectsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 2,
+  },
+  projectPill: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    minWidth: 80,
+    gap: 2,
+  },
+  projectPillDate: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#888',
+  },
+  projectPillStatus: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#333',
+  },
+  projectPillCurrentDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    marginTop: 2,
+  },
+  projectPillAdd: {
+    backgroundColor: '#f0f0f0',
+    borderColor: '#bbb',
+    borderStyle: 'dashed',
+    justifyContent: 'center',
+  },
+  projectPillAddText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#555',
+  },
+
+  // ── Job Tabs ──
+  jobTabRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 16,
+    marginBottom: 4,
+  },
+  jobTabBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+    backgroundColor: '#ebebeb',
+  },
+  jobTabBtnActive: {
+    backgroundColor: '#1976d2',
+  },
+  jobTabBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#777',
+  },
+  jobTabBtnTextActive: {
     color: '#fff',
   },
 
