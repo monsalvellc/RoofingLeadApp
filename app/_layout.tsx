@@ -17,8 +17,8 @@ function NavigationGuard() {
       // Not logged in — send to login
       router.replace('/login');
     } else if (user && inAuthGroup) {
-      // Already logged in — send to dashboard
-      router.replace('/');
+      // Already logged in — send to tabs
+      router.replace('/(tabs)');
     }
   }, [user, isLoading, segments]);
 
@@ -37,7 +37,9 @@ function NavigationGuard() {
         headerTintColor: '#fff',
         headerTitleStyle: { fontWeight: '700' },
       }}
-    />
+    >
+      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+    </Stack>
   );
 }
 
