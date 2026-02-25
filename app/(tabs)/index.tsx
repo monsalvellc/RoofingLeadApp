@@ -49,7 +49,7 @@ const TYPE_FILTERS: Job['jobType'][] = ['Retail', 'Insurance'];
 
 export default function DashboardScreen() {
   const router = useRouter();
-  const { userProfile } = useAuth();
+  const { user, userProfile } = useAuth();
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
@@ -62,14 +62,34 @@ export default function DashboardScreen() {
   const [pendingStatus, setPendingStatus] = useState<Job['status'] | null>(null);
   const [pendingType, setPendingType] = useState<Job['jobType'] | null>(null);
 
+  // SuperAdmin view mode toggle
+  const [viewMode, setViewMode] = useState<'personal' | 'unassigned' | 'company'>('personal');
+
   // Firebase listener — master list
   useEffect(() => {
-    if (!userProfile?.companyId) return;
-    const q = query(
-      collection(db, 'jobs'),
-      where('companyId', '==', userProfile?.companyId),
-      orderBy('createdAt', 'desc'),
-    );
+    if (!user?.uid) return;
+    if ((viewMode === 'company' || viewMode === 'unassigned') && !userProfile?.companyId) return;
+
+    const q =
+      viewMode === 'company'
+        ? query(
+            collection(db, 'jobs'),
+            where('companyId', '==', userProfile!.companyId),
+            orderBy('createdAt', 'desc'),
+          )
+        : viewMode === 'unassigned'
+        ? query(
+            collection(db, 'jobs'),
+            where('companyId', '==', userProfile!.companyId),
+            where('assignedUserIds', '==', []),
+            orderBy('createdAt', 'desc'),
+          )
+        : query(
+            collection(db, 'jobs'),
+            where('assignedUserIds', 'array-contains', user.uid),
+            orderBy('createdAt', 'desc'),
+          );
+
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -84,7 +104,7 @@ export default function DashboardScreen() {
       },
     );
     return unsubscribe;
-  }, [userProfile?.companyId]);
+  }, [user?.uid, viewMode, userProfile?.companyId]);
 
   // Client-side filter effect
   useEffect(() => {
@@ -180,6 +200,36 @@ export default function DashboardScreen() {
         <Text style={styles.subtitle}>
           {isFiltering ? `${filteredJobs.length} of ${jobs.length}` : jobs.length} Jobs
         </Text>
+      </View>
+
+      {/* View mode toggle (visible to all users; Company tab gated to SuperAdmin) */}
+      <View style={styles.segmentContainer}>
+        <Pressable
+          style={[styles.segmentBtn, viewMode === 'personal' && styles.segmentBtnActive]}
+          onPress={() => setViewMode('personal')}
+        >
+          <Text style={[styles.segmentText, viewMode === 'personal' && styles.segmentTextActive]}>
+            My Jobs
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[styles.segmentBtn, viewMode === 'unassigned' && styles.segmentBtnActive]}
+          onPress={() => setViewMode('unassigned')}
+        >
+          <Text style={[styles.segmentText, viewMode === 'unassigned' && styles.segmentTextActive]}>
+            Unassigned
+          </Text>
+        </Pressable>
+        {userProfile?.role === 'SuperAdmin' && (
+          <Pressable
+            style={[styles.segmentBtn, viewMode === 'company' && styles.segmentBtnActive]}
+            onPress={() => setViewMode('company')}
+          >
+            <Text style={[styles.segmentText, viewMode === 'company' && styles.segmentTextActive]}>
+              Company
+            </Text>
+          </Pressable>
+        )}
       </View>
 
       {/* Search bar + Filter button row */}
@@ -383,6 +433,39 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#c8e6c9',
     marginTop: 4,
+  },
+
+  // SuperAdmin segmented control
+  segmentContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#e0e0e0',
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 4,
+    borderRadius: 10,
+    padding: 3,
+  },
+  segmentBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: 'center',
+    borderRadius: 8,
+  },
+  segmentBtnActive: {
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  segmentText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#888',
+  },
+  segmentTextActive: {
+    color: '#2e7d32',
   },
 
   // Search row
