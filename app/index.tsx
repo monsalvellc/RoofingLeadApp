@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, deleteDoc, deleteField, doc, getDocs, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
 import { db } from '../config/firebaseConfig';
 import { Job } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -95,13 +95,24 @@ export default function DashboardScreen() {
     let result = jobs;
 
     if (searchQuery.trim()) {
-      const q = searchQuery.trim().toLowerCase();
-      result = result.filter(
-        (job) =>
-          job.customerName?.toLowerCase().includes(q) ||
-          job.customerPhone?.toLowerCase().includes(q) ||
-          job.id.toLowerCase().includes(q),
-      );
+      const lowerQuery = searchQuery.trim().toLowerCase();
+      const numericQuery = searchQuery.replace(/\D/g, '');
+      result = result.filter((job) => {
+        const name = (job.customerName || '').toLowerCase();
+        const address = ((job as any).customerAddress || '').toLowerCase();
+        const altAddress = ((job as any).customerAlternateAddress || '').toLowerCase();
+        const phone = (job.customerPhone || '').replace(/\D/g, '');
+        const jName = (job.jobName || '').toLowerCase();
+        const jId = (job.jobId || '').toLowerCase();
+
+        if (name.includes(lowerQuery)) return true;
+        if (address.includes(lowerQuery)) return true;
+        if (altAddress.includes(lowerQuery)) return true;
+        if (jName.includes(lowerQuery)) return true;
+        if (jId.includes(lowerQuery)) return true;
+        if (numericQuery.length > 0 && phone.includes(numericQuery)) return true;
+        return false;
+      });
     }
 
     if (statusFilter) {
@@ -135,40 +146,35 @@ export default function DashboardScreen() {
     setIsFilterModalVisible(false);
   };
 
-  const migrateLegacyPhotos = () => {
+  const migrateAddresses = async () => {
     Alert.alert(
-      'Migrate Legacy Photos?',
-      'Converts old string photo arrays to structured JobFile objects and removes the legacy "photos" field.',
+      'Migrate Addresses?',
+      'Copies customer address fields onto Job documents for all existing leads.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Migrate',
-          style: 'destructive',
           onPress: async () => {
             try {
               const snapshot = await getDocs(collection(db, 'jobs'));
               let count = 0;
               const updates: Promise<void>[] = [];
-              snapshot.forEach((docSnap) => {
-                const data = docSnap.data();
-                if (data.photos && Array.isArray(data.photos)) {
-                  const newFiles = data.photos.map((url: string, i: number) => ({
-                    id: Date.now().toString() + i,
-                    url,
-                    type: 'inspection',
-                    isSharedWithCustomer: false,
-                    createdAt: new Date().toISOString(),
-                  }));
-                  const existing = Array.isArray(data.files) ? data.files : [];
-                  updates.push(
-                    updateDoc(doc(db, 'jobs', docSnap.id), {
-                      files: [...existing, ...newFiles],
-                      photos: deleteField(),
-                    }),
-                  );
-                  count++;
+              for (const jobSnap of snapshot.docs) {
+                const data = jobSnap.data();
+                if (!data.customerAddress && data.customerId) {
+                  const custSnap = await getDoc(doc(db, 'customers', data.customerId));
+                  if (custSnap.exists()) {
+                    const custData = custSnap.data();
+                    updates.push(
+                      updateDoc(doc(db, 'jobs', jobSnap.id), {
+                        customerAddress: custData.address || '',
+                        customerAlternateAddress: custData.alternateAddress || '',
+                      }),
+                    );
+                    count++;
+                  }
                 }
-              });
+              }
               await Promise.all(updates);
               Alert.alert('Done', `Migrated ${count} job(s).`);
             } catch (e: any) {
@@ -225,16 +231,22 @@ export default function DashboardScreen() {
 
       {/* Search bar + Filter button row */}
       <View style={styles.searchRow}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search name, phone, or ID..."
-          placeholderTextColor="#aaa"
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          clearButtonMode="while-editing"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+        <View style={styles.searchInputWrapper}>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search name, phone, address..."
+            placeholderTextColor="#aaa"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {searchQuery.length > 0 && (
+            <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.clearBtn}>
+              <Text style={styles.clearBtnText}>✕</Text>
+            </TouchableOpacity>
+          )}
+        </View>
         <TouchableOpacity style={styles.filterButton} onPress={openFilterModal}>
           <Ionicons name="filter" size={20} color="white" />
           {activeFilterCount > 0 && (
@@ -317,7 +329,7 @@ export default function DashboardScreen() {
       </Pressable>
 
       {/* ── Temporary Migration Tool ── */}
-      <Button title="MIGRATE DATA" onPress={migrateLegacyPhotos} color="red" />
+      <Button title="MIGRATE ADDRESSES" onPress={migrateAddresses} color="red" />
 
       {/* ── Filter Modal ── */}
       <Modal
@@ -434,14 +446,28 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e0e0e0',
     gap: 10,
   },
-  searchInput: {
+  searchInputWrapper: {
     flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#f0f0f0',
     borderRadius: 10,
+  },
+  searchInput: {
+    flex: 1,
     paddingHorizontal: 14,
     paddingVertical: 9,
     fontSize: 15,
     color: '#1a1a1a',
+  },
+  clearBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  clearBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#999',
   },
   filterButton: {
     width: 45,

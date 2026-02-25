@@ -229,6 +229,8 @@ export default function AddLeadScreen() {
       isDeleted: false,
       customerName: `${firstName} ${lastName}`.trim(),
       customerPhone: phone || '',
+      customerAddress: address || '',
+      customerAlternateAddress: alternateAddress || '',
       jobName: jobName || '',
       jobDescription: jobDescription || '',
       measurements: measurements || '',

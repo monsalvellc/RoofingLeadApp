@@ -4,6 +4,7 @@ module.exports = {
   expo: {
     name: 'RoofingLeadApp',
     slug: 'roofingleadapp',
+    scheme: 'roofingcrm',
     extra: {
       TEST_VAR: process.env.TEST_VAR,
       FIREBASE_API_KEY: process.env.FIREBASE_API_KEY,
