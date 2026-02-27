@@ -5,6 +5,7 @@ import {
   Dimensions,
   FlatList,
   Image,
+  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -17,13 +18,13 @@ import {
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { addDoc, arrayUnion, collection, doc, getDoc, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as MediaLibrary from 'expo-media-library';
-import { db, storage } from '../../config/firebaseConfig';
-import { Customer, Job, JobFile } from '../../types';
+import * as Sharing from 'expo-sharing';
+import { auth, db, storage } from '../../config/firebaseConfig';
+import { Customer, Job, JobFile, JobMedia } from '../../types';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -81,8 +82,12 @@ export default function JobDetailScreen() {
   const [editingShared, setEditingShared] = useState(false);
 
   // Full-screen viewer
-  const [viewingIndex, setViewingIndex] = useState<number | null>(null);
-  const [filteredPhotos, setFilteredPhotos] = useState<JobFile[]>([]);
+  const [viewingMediaIdx, setViewingMediaIdx] = useState<number | null>(null);
+  const [viewingMediaList, setViewingMediaList] = useState<JobMedia[]>([]);
+
+  // Media edit modal
+  const [selectedMedia, setSelectedMedia] = useState<JobMedia | null>(null);
+  const [editingMediaShared, setEditingMediaShared] = useState(false);
 
   // Edit details modal
   const [isEditingDetails, setIsEditingDetails] = useState(false);
@@ -102,7 +107,7 @@ export default function JobDetailScreen() {
   // Stable refs required by FlatList — must not be recreated on render
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
     if (viewableItems.length > 0 && viewableItems[0].index !== null) {
-      setViewingIndex(viewableItems[0].index);
+      setViewingMediaIdx(viewableItems[0].index);
     }
   }).current;
 
@@ -197,6 +202,28 @@ export default function JobDetailScreen() {
     setEditingShared(file.isSharedWithCustomer);
   };
 
+  const openMediaModal = (media: JobMedia) => {
+    setSelectedMedia(media);
+    setEditingMediaShared(media.shared);
+  };
+
+  const handleUpdateMedia = async () => {
+    if (!selectedMedia || !job) return;
+    const photoField = selectedMedia.category === 'inspection' ? 'inspectionPhotos' : 'installPhotos';
+    const updatedMedia: JobMedia = { ...selectedMedia, shared: editingMediaShared };
+    const updatedList = ((job as any)[photoField] as JobMedia[]).map((m: JobMedia) =>
+      m.id === selectedMedia.id ? updatedMedia : m,
+    );
+    try {
+      await updateDoc(doc(db, 'jobs', id), { [photoField]: updatedList });
+      setJob((prev) => prev ? { ...prev, [photoField]: updatedList } : prev);
+      setSelectedMedia(null);
+    } catch (e) {
+      console.error('Failed to update media:', e);
+      Alert.alert('Error', 'Could not update photo.');
+    }
+  };
+
   const handleUpdateFile = async () => {
     if (!selectedFile || !job) return;
     const updatedFile: JobFile = {
@@ -211,64 +238,20 @@ export default function JobDetailScreen() {
       await updateDoc(doc(db, 'jobs', id), { files: updatedFiles });
       setJob((prev) => prev ? { ...prev, files: updatedFiles as any } : prev);
       setSelectedFile(null);
-      setViewingIndex(null);
     } catch (e) {
       console.error('Failed to update file:', e);
       Alert.alert('Error', 'Could not update file.');
     }
   };
 
-  const handleDownloadPhoto = async (url: string) => {
-    const { status } = await MediaLibrary.requestPermissionsAsync(true);
-    if (status !== 'granted') {
-      Alert.alert('Permission Required', 'Photo library access is needed to save photos.');
-      return;
-    }
+  const handleDownloadMedia = async (url: string, fileName: string) => {
     try {
-      const fileUri = FileSystem.documentDirectory + 'photo_' + Date.now() + '.jpg';
+      const fileUri = (FileSystem.documentDirectory ?? '') + fileName;
       const { uri } = await FileSystem.downloadAsync(url, fileUri);
-      await MediaLibrary.saveToLibraryAsync(uri);
-      Alert.alert('Saved!', 'Photo saved to your gallery.');
+      await Sharing.shareAsync(uri);
     } catch (e) {
       console.error('Download failed:', e);
-      Alert.alert('Download Failed', 'Could not save photo. Please try again.');
-    }
-  };
-
-  const handleAddPhoto = async (photoType: JobFile['type'] = 'inspection') => {
-    try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Camera access is needed to take photos.');
-        return;
-      }
-
-      const result = await ImagePicker.launchCameraAsync({ quality: 0.7 });
-      if (result.canceled) return;
-
-      setIsUploading(true);
-
-      const response = await fetch(result.assets[0].uri);
-      const blob = await response.blob();
-
-      const imageRef = ref(storage, `jobs/${id}/${Date.now()}.jpg`);
-      await uploadBytes(imageRef, blob);
-      const downloadUrl = await getDownloadURL(imageRef);
-
-      const newFile: JobFile = {
-        id: Date.now().toString(),
-        url: downloadUrl,
-        type: photoType,
-        isSharedWithCustomer: false,
-        createdAt: new Date().toISOString(),
-      };
-      await updateDoc(doc(db, 'jobs', id), { files: arrayUnion(newFile) });
-      setJob((prev) => prev ? { ...prev, files: [...(prev.files ?? []), newFile as any] } : prev);
-    } catch (e) {
-      console.error('Photo upload failed:', e);
-      Alert.alert('Upload Failed', 'Could not upload photo. Please try again.');
-    } finally {
-      setIsUploading(false);
+      Alert.alert('Download Failed', 'Could not download the file. Please try again.');
     }
   };
 
@@ -303,6 +286,125 @@ export default function JobDetailScreen() {
     } finally {
       setIsUploading(false);
     }
+  };
+
+  // Pure storage helper — uploads one image and returns a JobMedia object.
+  // Does NOT touch isUploading or Firestore; callers handle that.
+  const processAndUploadImage = async (
+    uri: string,
+    photoType: 'inspectionPhotos' | 'installPhotos',
+    uniqueSuffix?: string,
+  ): Promise<JobMedia> => {
+    const response = await fetch(uri);
+    const blob = await response.blob();
+    const mediaId = uniqueSuffix ? `${Date.now()}_${uniqueSuffix}` : Date.now().toString();
+    const imageRef = ref(storage, `jobs/${id}/${photoType}/${mediaId}`);
+    await uploadBytes(imageRef, blob);
+    const downloadUrl = await getDownloadURL(imageRef);
+    return {
+      id: mediaId,
+      url: downloadUrl,
+      category: photoType === 'inspectionPhotos' ? 'inspection' : 'install',
+      shared: false,
+      uploadedAt: new Date().toISOString(),
+    };
+  };
+
+  const handleAddPhoto = async (photoType: 'inspectionPhotos' | 'installPhotos') => {
+    const userDocRef = doc(db, 'users', auth.currentUser?.uid ?? '');
+    const userDocSnap = await getDoc(userDocRef);
+    const userData = userDocSnap.data();
+    const isHd = userData?.allowHdToggle === true && userData?.hdPhotosEnabled === true;
+    const imageQuality = isHd ? 1 : 0.75;
+
+    Alert.alert('Add Photo', 'Choose an option', [
+      {
+        text: 'Camera',
+        onPress: async () => {
+          const { status } = await ImagePicker.requestCameraPermissionsAsync();
+          if (status !== 'granted') {
+            Alert.alert('Permission Required', 'Camera access is needed to take photos.');
+            return;
+          }
+          const result = await ImagePicker.launchCameraAsync({ quality: imageQuality });
+          if (!result.canceled) {
+            setIsUploading(true);
+            try {
+              const newMedia = await processAndUploadImage(result.assets[0].uri, photoType);
+              await updateDoc(doc(db, 'jobs', id), { [photoType]: arrayUnion(newMedia) });
+              setJob((prev) =>
+                prev ? { ...prev, [photoType]: [...((prev as any)[photoType] ?? []), newMedia] } : prev,
+              );
+            } catch (e) {
+              console.error('Photo upload failed:', e);
+              Alert.alert('Upload Failed', 'Could not upload photo. Please try again.');
+            } finally {
+              setIsUploading(false);
+            }
+          }
+        },
+      },
+      {
+        text: 'Gallery',
+        onPress: async () => {
+          const result = await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            quality: imageQuality,
+            allowsMultipleSelection: true,
+            selectionLimit: 10,
+          });
+          if (!result.canceled) {
+            setIsUploading(true);
+            try {
+              const newMediaArray = await Promise.all(
+                result.assets.map((asset, i) =>
+                  processAndUploadImage(asset.uri, photoType, String(i)),
+                ),
+              );
+              await updateDoc(doc(db, 'jobs', id), { [photoType]: arrayUnion(...newMediaArray) });
+              setJob((prev) =>
+                prev
+                  ? { ...prev, [photoType]: [...((prev as any)[photoType] ?? []), ...newMediaArray] }
+                  : prev,
+              );
+            } catch (e) {
+              console.error('Photo upload failed:', e);
+              Alert.alert('Upload Failed', 'Could not upload photos. Please try again.');
+            } finally {
+              setIsUploading(false);
+            }
+          }
+        },
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
+
+  const handleDeletePhoto = (media: JobMedia) => {
+    const photoField = media.category === 'inspection' ? 'inspectionPhotos' : 'installPhotos';
+    Alert.alert('Delete Photo', 'Are you sure you want to delete this photo?', [
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          if (!job) return;
+          try {
+            const updatedList = ((job as any)[photoField] as JobMedia[]).filter((m) => m.id !== media.id);
+            await updateDoc(doc(db, 'jobs', id), { [photoField]: updatedList });
+            setJob((prev) => prev ? { ...prev, [photoField]: updatedList } : prev);
+            try {
+              await deleteObject(ref(storage, media.url));
+            } catch (storageErr) {
+              console.warn('Could not delete from storage:', storageErr);
+            }
+          } catch (e) {
+            console.error('Delete failed:', e);
+            Alert.alert('Error', 'Could not delete photo.');
+          }
+        },
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const handleSaveDetails = async () => {
@@ -413,7 +515,7 @@ export default function JobDetailScreen() {
     job.carrier || job.adjusterName || job.adjusterPhone || job.adjusterEmail ||
     job.claimNumber || job.deductible || job.dateOfLoss || job.dateOfDiscovery;
 
-  const currentViewingFile = viewingIndex !== null ? filteredPhotos[viewingIndex] : null;
+  const currentViewingMedia = viewingMediaIdx !== null ? viewingMediaList[viewingMediaIdx] : null;
 
   return (
     <>
@@ -628,76 +730,109 @@ export default function JobDetailScreen() {
         {activeJobTab === 'media' && (
           <>
             {FILE_SECTIONS.map(({ type: sectionType, label }) => {
-              const sectionFiles = (job.files ?? []).filter((f: any) => f.type === sectionType) as JobFile[];
               const isDoc = sectionType === 'document';
+              const photoField = sectionType === 'inspection' ? 'inspectionPhotos' : 'installPhotos';
+              const photos: JobMedia[] = isDoc
+                ? []
+                : ((job as any)?.[photoField] ?? []).filter(
+                    (p: any) => p && typeof p === 'object' && typeof p.id === 'string',
+                  );
+              const docFiles = isDoc
+                ? ((job.files ?? []).filter((f: any) => f.type === 'document') as JobFile[])
+                : [];
+
               return (
                 <View key={sectionType}>
                   <Text style={styles.sectionTitle}>{label}</Text>
 
                   {isDoc ? (
-                    <TouchableOpacity
-                      style={[styles.docButton, isUploading && styles.photoButtonDisabled]}
-                      onPress={handleAddDocument}
-                      disabled={isUploading}
-                    >
-                      <Text style={styles.docButtonText}>
-                        {isUploading ? 'Uploading...' : '📄  Add Document'}
-                      </Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <TouchableOpacity
-                      style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
-                      onPress={() => handleAddPhoto(sectionType)}
-                      disabled={isUploading}
-                    >
-                      <Text style={styles.photoButtonText}>
-                        {isUploading ? 'Uploading...' : '📷  Add Photo'}
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-
-                  {sectionFiles.length > 0 ? (
-                    <View style={styles.photoGrid}>
-                      {sectionFiles.map((f, index) => (
-                        <TouchableOpacity
-                          key={f.id}
-                          style={styles.photoThumbWrapper}
-                          onPress={() => {
-                            if (isDoc) {
-                              openFileModal(f);
-                            } else {
-                              setFilteredPhotos(sectionFiles);
-                              setViewingIndex(index);
-                            }
-                          }}
-                        >
-                          {isDoc ? (
-                            <View style={styles.docCard}>
-                              <Text style={styles.docCardIcon}>📄</Text>
-                              <Text style={styles.docCardName} numberOfLines={3}>
-                                {f.name ?? 'Document'}
-                              </Text>
-                              {f.isSharedWithCustomer && (
-                                <View style={styles.docSharedBadge}>
-                                  <Text style={styles.sharedBadgeText}>Shared</Text>
+                    <>
+                      <TouchableOpacity
+                        style={[styles.docButton, isUploading && styles.photoButtonDisabled]}
+                        onPress={handleAddDocument}
+                        disabled={isUploading}
+                      >
+                        <Text style={styles.docButtonText}>
+                          {isUploading ? 'Uploading...' : '📄  Add Document'}
+                        </Text>
+                      </TouchableOpacity>
+                      {docFiles.length > 0 ? (
+                        <View style={styles.photoGrid}>
+                          {docFiles.map((f) => (
+                            <View key={f.id} style={styles.photoThumbWrapper}>
+                              <TouchableOpacity
+                                onPress={() => Linking.openURL(f.url)}
+                                onLongPress={() => openFileModal(f)}
+                              >
+                                <View style={styles.docCard}>
+                                  <Text style={styles.docCardIcon}>📄</Text>
+                                  <Text style={styles.docCardName} numberOfLines={3}>
+                                    {f.name ?? 'Document'}
+                                  </Text>
+                                  {f.isSharedWithCustomer && (
+                                    <View style={styles.docSharedBadge}>
+                                      <Text style={styles.sharedBadgeText}>Shared</Text>
+                                    </View>
+                                  )}
                                 </View>
-                              )}
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                style={styles.docDownloadBtn}
+                                onPress={() => handleDownloadMedia(f.url, f.name ?? `document_${f.id}`)}
+                              >
+                                <Text style={styles.docDownloadBtnText}>⬇  Download</Text>
+                              </TouchableOpacity>
                             </View>
-                          ) : (
-                            <>
-                              <Image source={{ uri: f.url }} style={styles.photoThumb} />
-                              {f.isSharedWithCustomer && (
-                                <View style={styles.sharedBadge}>
-                                  <Text style={styles.sharedBadgeText}>Shared</Text>
-                                </View>
-                              )}
-                            </>
-                          )}
-                        </TouchableOpacity>
-                      ))}
-                    </View>
+                          ))}
+                        </View>
+                      ) : (
+                        <Text style={styles.emptyFiles}>No documents yet.</Text>
+                      )}
+                    </>
                   ) : (
-                    <Text style={styles.emptyFiles}>No {label.toLowerCase()} yet.</Text>
+                    <>
+                      <TouchableOpacity
+                        style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
+                        onPress={() => handleAddPhoto(photoField as 'inspectionPhotos' | 'installPhotos')}
+                        disabled={isUploading}
+                      >
+                        <Text style={styles.photoButtonText}>
+                          {isUploading ? 'Uploading...' : '📷  Add Photo'}
+                        </Text>
+                      </TouchableOpacity>
+                      {photos.length > 0 ? (
+                        <>
+                          <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            contentContainerStyle={{ gap: 10, marginTop: 10 }}
+                          >
+                            {photos.map((photo, i) => (
+                              <Pressable
+                                key={photo.id}
+                                onPress={() => {
+                                  setViewingMediaList(photos);
+                                  setViewingMediaIdx(i);
+                                }}
+                                onLongPress={() => handleDeletePhoto(photo)}
+                              >
+                                <View>
+                                  <Image source={{ uri: photo.url }} style={styles.photoHThumb} />
+                                  {photo.shared && (
+                                    <View style={styles.sharedBadge}>
+                                      <Text style={styles.sharedBadgeText}>Shared</Text>
+                                    </View>
+                                  )}
+                                </View>
+                              </Pressable>
+                            ))}
+                          </ScrollView>
+                          <Text style={styles.photoHint}>Tap to view  ·  Long press to delete</Text>
+                        </>
+                      ) : (
+                        <Text style={styles.emptyFiles}>No {label.toLowerCase()} yet.</Text>
+                      )}
+                    </>
                   )}
                 </View>
               );
@@ -709,22 +844,22 @@ export default function JobDetailScreen() {
 
       {/* ── Full-Screen Photo Viewer ── */}
       <Modal
-        visible={viewingIndex !== null}
+        visible={viewingMediaIdx !== null}
         transparent={false}
         animationType="fade"
-        onRequestClose={() => setViewingIndex(null)}
+        onRequestClose={() => setViewingMediaIdx(null)}
       >
         <View style={styles.viewerContainer}>
 
           <View style={styles.viewerHeader}>
-            <TouchableOpacity onPress={() => setViewingIndex(null)} hitSlop={12} style={styles.viewerHeaderBtn}>
+            <TouchableOpacity onPress={() => setViewingMediaIdx(null)} hitSlop={12} style={styles.viewerHeaderBtn}>
               <Text style={styles.viewerClose}>✕  Close</Text>
             </TouchableOpacity>
             <Text style={styles.viewerCounter}>
-              {viewingIndex !== null ? `${viewingIndex + 1} / ${filteredPhotos.length}` : ''}
+              {viewingMediaIdx !== null ? `${viewingMediaIdx + 1} / ${viewingMediaList.length}` : ''}
             </Text>
             <TouchableOpacity
-              onPress={() => { if (currentViewingFile) openFileModal(currentViewingFile); }}
+              onPress={() => { if (currentViewingMedia) openMediaModal(currentViewingMedia); }}
               hitSlop={12}
               style={styles.viewerHeaderBtn}
             >
@@ -733,11 +868,11 @@ export default function JobDetailScreen() {
           </View>
 
           <FlatList
-            data={filteredPhotos}
+            data={viewingMediaList}
             horizontal
             pagingEnabled
             showsHorizontalScrollIndicator={false}
-            initialScrollIndex={viewingIndex ?? 0}
+            initialScrollIndex={viewingMediaIdx ?? 0}
             getItemLayout={(_, index) => ({
               length: SCREEN_WIDTH,
               offset: SCREEN_WIDTH * index,
@@ -767,20 +902,64 @@ export default function JobDetailScreen() {
           />
 
           <View style={styles.viewerFooter}>
-            {currentViewingFile?.isSharedWithCustomer && (
+            {currentViewingMedia?.shared && (
               <View style={styles.viewerSharedBadge}>
                 <Text style={styles.viewerSharedText}>Shared with Customer</Text>
               </View>
             )}
             <TouchableOpacity
               style={styles.downloadBtn}
-              onPress={() => { if (currentViewingFile) handleDownloadPhoto(currentViewingFile.url); }}
+              onPress={() => { if (currentViewingMedia) handleDownloadMedia(currentViewingMedia.url, `photo_${currentViewingMedia.id}.jpg`); }}
             >
               <Text style={styles.downloadBtnText}>⬇  Download to Phone</Text>
             </TouchableOpacity>
           </View>
 
         </View>
+      </Modal>
+
+      {/* ── Media Edit Modal ── */}
+      <Modal
+        visible={!!selectedMedia}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSelectedMedia(null)}
+      >
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setSelectedMedia(null)}
+        >
+          <TouchableOpacity style={styles.fileModalSheet} activeOpacity={1} onPress={() => {}}>
+
+            <View style={styles.fileModalHeader}>
+              <Text style={styles.fileModalTitle}>Edit Photo</Text>
+              <TouchableOpacity onPress={() => setSelectedMedia(null)} hitSlop={12}>
+                <Text style={styles.fileModalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.switchRow}>
+              <Text style={styles.switchLabel}>Share with Customer</Text>
+              <Switch
+                value={editingMediaShared}
+                onValueChange={setEditingMediaShared}
+                trackColor={{ false: '#ccc', true: '#81c784' }}
+                thumbColor={editingMediaShared ? '#2e7d32' : '#f4f3f4'}
+              />
+            </View>
+
+            <View style={styles.fileModalActions}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setSelectedMedia(null)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.saveFileBtn} onPress={handleUpdateMedia}>
+                <Text style={styles.saveFileBtnText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+
+          </TouchableOpacity>
+        </TouchableOpacity>
       </Modal>
 
       {/* ── File Edit Modal ── */}
@@ -1343,6 +1522,20 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 6,
   },
+  docDownloadBtn: {
+    backgroundColor: '#e3f2fd',
+    borderRadius: 6,
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    marginTop: 4,
+    width: 100,
+  },
+  docDownloadBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#1565c0',
+  },
 
   // Financials
   divider: {
@@ -1740,5 +1933,22 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1a1a1a',
     marginBottom: 8,
+  },
+
+  // ── Horizontal photo strip ──
+  photoHScroll: {
+    marginTop: 10,
+    marginBottom: 6,
+  },
+  photoHThumb: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+  },
+  photoHint: {
+    fontSize: 11,
+    color: '#bbb',
+    fontStyle: 'italic',
+    marginTop: 6,
   },
 });

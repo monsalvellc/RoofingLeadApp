@@ -64,6 +64,14 @@ export interface JobFile {
   createdAt: string;
 }
 
+export interface JobMedia {
+  id: string;
+  url: string;
+  category: 'inspection' | 'install';
+  shared: boolean;
+  uploadedAt: string;
+}
+
 export interface Job {
   // 1. Core / System
   id: string;
@@ -135,4 +143,8 @@ export interface Job {
   // 8. Files
   files: LeadFile[] | JobFile[];
   folderPermissions: Record<string, boolean>;
+
+  // 9. Photos (structured media)
+  inspectionPhotos?: JobMedia[];
+  installPhotos?: JobMedia[];
 }
