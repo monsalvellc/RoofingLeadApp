@@ -244,6 +244,37 @@ export default function JobDetailScreen() {
     }
   };
 
+  const handleDeleteDocument = (file: JobFile) => {
+    Alert.alert(
+      'Delete Document',
+      'Are you sure you want to delete this document? This cannot be undone.',
+      [
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            if (!job) return;
+            try {
+              const updatedFiles = (job.files as any[]).filter((f: any) => f.id !== file.id);
+              await updateDoc(doc(db, 'jobs', id), { files: updatedFiles });
+              setJob((prev) => prev ? { ...prev, files: updatedFiles as any } : prev);
+              setSelectedFile(null);
+              try {
+                await deleteObject(ref(storage, file.url));
+              } catch (storageErr) {
+                console.warn('Could not delete from storage:', storageErr);
+              }
+            } catch (e) {
+              console.error('Delete document failed:', e);
+              Alert.alert('Error', 'Could not delete document.');
+            }
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  };
+
   const handleDownloadMedia = async (url: string, fileName: string) => {
     try {
       const fileUri = (FileSystem.documentDirectory ?? '') + fileName;
@@ -310,74 +341,70 @@ export default function JobDetailScreen() {
     };
   };
 
-  const handleAddPhoto = async (photoType: 'inspectionPhotos' | 'installPhotos') => {
+  const handleCameraPhoto = async (photoType: 'inspectionPhotos' | 'installPhotos') => {
     const userDocRef = doc(db, 'users', auth.currentUser?.uid ?? '');
     const userDocSnap = await getDoc(userDocRef);
     const userData = userDocSnap.data();
     const isHd = userData?.allowHdToggle === true && userData?.hdPhotosEnabled === true;
     const imageQuality = isHd ? 1 : 0.75;
 
-    Alert.alert('Add Photo', 'Choose an option', [
-      {
-        text: 'Camera',
-        onPress: async () => {
-          const { status } = await ImagePicker.requestCameraPermissionsAsync();
-          if (status !== 'granted') {
-            Alert.alert('Permission Required', 'Camera access is needed to take photos.');
-            return;
-          }
-          const result = await ImagePicker.launchCameraAsync({ quality: imageQuality });
-          if (!result.canceled) {
-            setIsUploading(true);
-            try {
-              const newMedia = await processAndUploadImage(result.assets[0].uri, photoType);
-              await updateDoc(doc(db, 'jobs', id), { [photoType]: arrayUnion(newMedia) });
-              setJob((prev) =>
-                prev ? { ...prev, [photoType]: [...((prev as any)[photoType] ?? []), newMedia] } : prev,
-              );
-            } catch (e) {
-              console.error('Photo upload failed:', e);
-              Alert.alert('Upload Failed', 'Could not upload photo. Please try again.');
-            } finally {
-              setIsUploading(false);
-            }
-          }
-        },
-      },
-      {
-        text: 'Gallery',
-        onPress: async () => {
-          const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
-            quality: imageQuality,
-            allowsMultipleSelection: true,
-            selectionLimit: 10,
-          });
-          if (!result.canceled) {
-            setIsUploading(true);
-            try {
-              const newMediaArray = await Promise.all(
-                result.assets.map((asset, i) =>
-                  processAndUploadImage(asset.uri, photoType, String(i)),
-                ),
-              );
-              await updateDoc(doc(db, 'jobs', id), { [photoType]: arrayUnion(...newMediaArray) });
-              setJob((prev) =>
-                prev
-                  ? { ...prev, [photoType]: [...((prev as any)[photoType] ?? []), ...newMediaArray] }
-                  : prev,
-              );
-            } catch (e) {
-              console.error('Photo upload failed:', e);
-              Alert.alert('Upload Failed', 'Could not upload photos. Please try again.');
-            } finally {
-              setIsUploading(false);
-            }
-          }
-        },
-      },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Camera access is needed to take photos.');
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({ quality: imageQuality });
+    if (!result.canceled) {
+      setIsUploading(true);
+      try {
+        const newMedia = await processAndUploadImage(result.assets[0].uri, photoType);
+        await updateDoc(doc(db, 'jobs', id), { [photoType]: arrayUnion(newMedia) });
+        setJob((prev) =>
+          prev ? { ...prev, [photoType]: [...((prev as any)[photoType] ?? []), newMedia] } : prev,
+        );
+      } catch (e) {
+        console.error('Photo upload failed:', e);
+        Alert.alert('Upload Failed', 'Could not upload photo. Please try again.');
+      } finally {
+        setIsUploading(false);
+      }
+    }
+  };
+
+  const handleGalleryPhoto = async (photoType: 'inspectionPhotos' | 'installPhotos') => {
+    const userDocRef = doc(db, 'users', auth.currentUser?.uid ?? '');
+    const userDocSnap = await getDoc(userDocRef);
+    const userData = userDocSnap.data();
+    const isHd = userData?.allowHdToggle === true && userData?.hdPhotosEnabled === true;
+    const imageQuality = isHd ? 1 : 0.75;
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: imageQuality,
+      allowsMultipleSelection: true,
+      selectionLimit: 10,
+    });
+    if (!result.canceled) {
+      setIsUploading(true);
+      try {
+        const newMediaArray = await Promise.all(
+          result.assets.map((asset, i) =>
+            processAndUploadImage(asset.uri, photoType, String(i)),
+          ),
+        );
+        await updateDoc(doc(db, 'jobs', id), { [photoType]: arrayUnion(...newMediaArray) });
+        setJob((prev) =>
+          prev
+            ? { ...prev, [photoType]: [...((prev as any)[photoType] ?? []), ...newMediaArray] }
+            : prev,
+        );
+      } catch (e) {
+        console.error('Photo upload failed:', e);
+        Alert.alert('Upload Failed', 'Could not upload photos. Please try again.');
+      } finally {
+        setIsUploading(false);
+      }
+    }
   };
 
   const handleDeletePhoto = (media: JobMedia) => {
@@ -791,15 +818,26 @@ export default function JobDetailScreen() {
                     </>
                   ) : (
                     <>
-                      <TouchableOpacity
-                        style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
-                        onPress={() => handleAddPhoto(photoField as 'inspectionPhotos' | 'installPhotos')}
-                        disabled={isUploading}
-                      >
-                        <Text style={styles.photoButtonText}>
-                          {isUploading ? 'Uploading...' : '📷  Add Photo'}
-                        </Text>
-                      </TouchableOpacity>
+                      <View style={styles.photoButtonRow}>
+                        <TouchableOpacity
+                          style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
+                          onPress={() => handleCameraPhoto(photoField as 'inspectionPhotos' | 'installPhotos')}
+                          disabled={isUploading}
+                        >
+                          <Text style={styles.photoButtonText}>
+                            {isUploading ? 'Uploading...' : '📷  Capture with Camera'}
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.photoButtonOutlined, isUploading && styles.photoButtonDisabled]}
+                          onPress={() => handleGalleryPhoto(photoField as 'inspectionPhotos' | 'installPhotos')}
+                          disabled={isUploading}
+                        >
+                          <Text style={styles.photoButtonOutlinedText}>
+                            🖼  Select from Gallery (max 10)
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
                       {photos.length > 0 ? (
                         <>
                           <ScrollView
@@ -1007,6 +1045,13 @@ export default function JobDetailScreen() {
                 thumbColor={editingShared ? '#2e7d32' : '#f4f3f4'}
               />
             </View>
+
+            <TouchableOpacity
+              style={styles.deleteDocBtn}
+              onPress={() => { if (selectedFile) handleDeleteDocument(selectedFile); }}
+            >
+              <Text style={styles.deleteDocBtnText}>Delete Document</Text>
+            </TouchableOpacity>
 
             <View style={styles.fileModalActions}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setSelectedFile(null)}>
@@ -1442,6 +1487,21 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#fff',
   },
+  photoButtonRow: {
+    gap: 8,
+  },
+  photoButtonOutlined: {
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: '#1976d2',
+  },
+  photoButtonOutlinedText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1976d2',
+  },
   photoGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1739,6 +1799,18 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#fff',
+  },
+  deleteDocBtn: {
+    paddingVertical: 14,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#c62828',
+    alignItems: 'center',
+  },
+  deleteDocBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#c62828',
   },
 
   // ── Edit Details Modal ──
