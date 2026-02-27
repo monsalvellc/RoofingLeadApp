@@ -769,7 +769,13 @@ export default function JobDetailScreen() {
                 : [];
 
               return (
-                <View key={sectionType}>
+                <View
+                  key={sectionType}
+                  style={[
+                    styles.mediaSection,
+                    !isDoc && styles.mediaSectionDivider,
+                  ]}
+                >
                   <Text style={styles.sectionTitle}>{label}</Text>
 
                   {isDoc ? (
@@ -820,21 +826,21 @@ export default function JobDetailScreen() {
                     <>
                       <View style={styles.photoButtonRow}>
                         <TouchableOpacity
-                          style={[styles.photoButton, isUploading && styles.photoButtonDisabled]}
+                          style={[styles.photoButton, { flex: 1 }, isUploading && styles.photoButtonDisabled]}
                           onPress={() => handleCameraPhoto(photoField as 'inspectionPhotos' | 'installPhotos')}
                           disabled={isUploading}
                         >
                           <Text style={styles.photoButtonText}>
-                            {isUploading ? 'Uploading...' : '📷  Capture with Camera'}
+                            {isUploading ? 'Uploading...' : '📷  Camera'}
                           </Text>
                         </TouchableOpacity>
                         <TouchableOpacity
-                          style={[styles.photoButtonOutlined, isUploading && styles.photoButtonDisabled]}
+                          style={[styles.photoButtonOutlined, { flex: 1 }, isUploading && styles.photoButtonDisabled]}
                           onPress={() => handleGalleryPhoto(photoField as 'inspectionPhotos' | 'installPhotos')}
                           disabled={isUploading}
                         >
                           <Text style={styles.photoButtonOutlinedText}>
-                            🖼  Select from Gallery (max 10)
+                            🖼  Gallery
                           </Text>
                         </TouchableOpacity>
                       </View>
@@ -1488,19 +1494,27 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   photoButtonRow: {
+    flexDirection: 'row',
     gap: 8,
   },
+  mediaSection: {
+    marginBottom: 24,
+  },
+  mediaSectionDivider: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#e8e8e8',
+    paddingBottom: 16,
+  },
   photoButtonOutlined: {
+    backgroundColor: '#1976d2',
     borderRadius: 10,
-    paddingVertical: 12,
+    paddingVertical: 13,
     alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: '#1976d2',
   },
   photoButtonOutlinedText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#1976d2',
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
   },
   photoGrid: {
     flexDirection: 'row',
